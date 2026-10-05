@@ -221,37 +221,9 @@ final class EditorSession: ObservableObject {
 
     func moveLayer(_ id: UUID, relativeTo targetID: UUID, placement: LayerDropPlacement) {
         cancelStroke()
-        guard let target = page.layers.first(where: { $0.id == targetID }) else { return }
-        if placement == .inside && target.kind != .folder { return }
-        let destinationParent = placement == .inside ? targetID : target.parentID
-        if let destinationParent, page.isEffectivelyLocked(destinationParent) { return }
         let requested = selectedLayerIDs.contains(id) ? selectedLayerIDs : [id]
-        let roots = requested.filter { candidate in
-            !requested.contains { $0 != candidate && page.isDescendant(candidate, of: $0) }
-        }
-        guard !roots.isEmpty, roots.allSatisfy({ !page.isEffectivelyLocked($0) }) else { return }
-        let ranges = roots.compactMap(page.subtreeRange).sorted { $0.lowerBound < $1.lowerBound }
-        guard ranges.count == roots.count else { return }
-        let movingIDs = Set(ranges.flatMap { page.layers[$0].map(\.id) })
-        guard !movingIDs.contains(targetID) else { return }
-        var updated = page.layers
-        var moving: [LayerRecord] = []
-        for range in ranges {
-            var block = Array(page.layers[range])
-            block[0].parentID = destinationParent
-            moving.append(contentsOf: block)
-        }
-        updated.removeAll { movingIDs.contains($0.id) }
-        var remaining = page
-        remaining.layers = updated
-        guard let targetRange = remaining.subtreeRange(of: targetID) else { return }
-        let index: Int
-        switch placement {
-        case .above, .inside: index = targetRange.upperBound
-        case .below: index = targetRange.lowerBound
-        }
-        updated.insert(contentsOf: moving, at: index)
-        guard updated != page.layers else { return }
+        guard let updated = page.movingLayers(requested, relativeTo: targetID,
+                                              placement: placement) else { return }
         perform(.replaceLayerStack(updated))
     }
 

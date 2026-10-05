@@ -28,6 +28,7 @@ private struct EditorWorkspace: View {
     @State private var showColorEditor = false
     @State private var collapsedFolders: Set<UUID> = []
     @State private var layerRowFrames: [UUID: CGRect] = [:]
+    @State private var layerListViewportHeight: CGFloat = 0
     @State private var draggingLayerID: UUID?
     @State private var layerDropTarget: LayerDragTarget?
 
@@ -263,18 +264,31 @@ private struct EditorWorkspace: View {
     }
 
     private var layerList: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(visibleLayerEntries) { entry in
-                    layerRow(entry)
+        GeometryReader { geometry in
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(visibleLayerEntries) { entry in
+                        layerRow(entry)
+                    }
+                    Rectangle()
+                        .fill(.clear)
+                        .frame(height: max(48, geometry.size.height - CGFloat(visibleLayerEntries.count * 31) - 2))
+                        .contentShape(Rectangle())
+                        .overlay(alignment: .top) {
+                            if let target = layerDropTarget, target.lineRowID == nil {
+                                layerDropLine(depth: target.depth)
+                            }
+                        }
                 }
+                .padding(1)
             }
-            .padding(1)
+            .coordinateSpace(name: "layerList")
+            .onPreferenceChange(LayerRowFrameKey.self) { layerRowFrames = $0 }
+            .onAppear { layerListViewportHeight = geometry.size.height }
+            .onChange(of: geometry.size.height) { _, height in layerListViewportHeight = height }
+            .background(Color(red: 0.105, green: 0.11, blue: 0.12))
+            .overlay(Rectangle().stroke(Color.white.opacity(0.10), lineWidth: 1))
         }
-        .coordinateSpace(name: "layerList")
-        .onPreferenceChange(LayerRowFrameKey.self) { layerRowFrames = $0 }
-        .background(Color(red: 0.105, green: 0.11, blue: 0.12))
-        .overlay(Rectangle().stroke(Color.white.opacity(0.10), lineWidth: 1))
         .padding(.horizontal, 3)
         .padding(.bottom, 3)
     }
@@ -299,6 +313,9 @@ private struct EditorWorkspace: View {
                     } label: {
                         Image(systemName: collapsedFolders.contains(layer.id) ? "chevron.right" : "chevron.down")
                             .frame(width: 10, height: 31)
+                            .foregroundStyle(layerDropTarget?.parentID == layer.id ? Color.accentColor : Color.primary)
+                            .background(layerDropTarget?.parentID == layer.id
+                                        ? Color.accentColor.opacity(0.22) : .clear)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(collapsedFolders.contains(layer.id) ? "展开文件夹" : "折叠文件夹")
@@ -350,23 +367,27 @@ private struct EditorWorkspace: View {
         .font(.system(size: 11))
         .frame(height: 31)
         .frame(maxWidth: .infinity)
-        .background(layerDropTarget == LayerDragTarget(id: layer.id, placement: .inside)
-                    ? Color.accentColor.opacity(0.3) :
-                    layer.id == session.selectedLayerID ? Color.accentColor.opacity(0.33) :
+        .background(layer.id == session.selectedLayerID ? Color.accentColor.opacity(0.33) :
                     session.selectedLayerIDs.contains(layer.id) ? Color.gray.opacity(0.30) : .clear)
+        .overlay(alignment: .leading) {
+            layerTreeGuides(entry)
+                .allowsHitTesting(false)
+        }
         .overlay(alignment: .leading) {
             if layer.id == session.selectedLayerID {
                 Rectangle().fill(Color.accentColor).frame(width: 2)
             }
         }
         .overlay(alignment: .top) {
-            if layerDropTarget == LayerDragTarget(id: layer.id, placement: .above) {
-                Rectangle().fill(Color.accentColor).frame(height: 2)
+            if let target = layerDropTarget,
+               target.lineRowID == layer.id, target.lineAtTop {
+                layerDropLine(depth: target.depth)
             }
         }
         .overlay(alignment: .bottom) {
-            if layerDropTarget == LayerDragTarget(id: layer.id, placement: .below) {
-                Rectangle().fill(Color.accentColor).frame(height: 2)
+            if let target = layerDropTarget,
+               target.lineRowID == layer.id, !target.lineAtTop {
+                layerDropLine(depth: target.depth)
             }
         }
         .opacity(draggingLayerID == layer.id ? 0.65 : 1)
@@ -377,6 +398,73 @@ private struct EditorWorkspace: View {
                                        value: [layer.id: proxy.frame(in: .named("layerList"))])
             }
         }
+    }
+
+    private func layerDropLine(depth: Int) -> some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: CGFloat(27 + depth * 10))
+            Rectangle().fill(Color.accentColor).frame(height: 2)
+        }
+        .frame(height: 2)
+        .allowsHitTesting(false)
+    }
+
+    private func hasFollowingSibling(_ id: UUID) -> Bool {
+        guard let index = session.page.layers.firstIndex(where: { $0.id == id }) else { return false }
+        let parentID = session.page.layers[index].parentID
+        return session.page.layers.prefix(index).contains { $0.parentID == parentID }
+    }
+
+    private func layerTreeGuides(_ entry: LayerDisplayEntry) -> some View {
+        var ancestors: [UUID] = []
+        var parentID = entry.layer.parentID
+        while let id = parentID,
+              let parent = session.page.layers.first(where: { $0.id == id }) {
+            ancestors.insert(id, at: 0)
+            parentID = parent.parentID
+        }
+        let continuingDepths = ancestors.enumerated().compactMap { depth, id in
+            hasFollowingSibling(id) ? depth + 1 : nil
+        }
+        let hasVisibleChildren = entry.layer.kind == .folder &&
+            !collapsedFolders.contains(entry.id) &&
+            session.page.layers.contains(where: { $0.parentID == entry.id })
+        let hasNext = hasFollowingSibling(entry.id)
+        let highlightedParent = layerDropTarget?.parentID
+        return Canvas { context, size in
+            let middle = size.height / 2
+            var lines = Path()
+            var highlightedLines = Path()
+            for depth in continuingDepths {
+                let x = CGFloat(22 + depth * 10)
+                let path = ancestors[depth - 1] == highlightedParent ? highlightedLines : lines
+                var segment = path
+                segment.move(to: CGPoint(x: x, y: 0))
+                segment.addLine(to: CGPoint(x: x, y: size.height))
+                if ancestors[depth - 1] == highlightedParent { highlightedLines = segment } else { lines = segment }
+            }
+            if entry.depth > 0 {
+                let x = CGFloat(22 + entry.depth * 10)
+                let isHighlighted = entry.layer.parentID == highlightedParent
+                var segment = isHighlighted ? highlightedLines : lines
+                segment.move(to: CGPoint(x: x, y: 0))
+                segment.addLine(to: CGPoint(x: x, y: hasNext ? size.height : middle))
+                segment.move(to: CGPoint(x: x, y: middle))
+                segment.addLine(to: CGPoint(x: x + 5, y: middle))
+                if isHighlighted { highlightedLines = segment } else { lines = segment }
+            }
+            if hasVisibleChildren {
+                let x = CGFloat(22 + (entry.depth + 1) * 10)
+                let isHighlighted = entry.id == highlightedParent
+                var segment = isHighlighted ? highlightedLines : lines
+                segment.move(to: CGPoint(x: x, y: middle))
+                segment.addLine(to: CGPoint(x: x, y: size.height))
+                if isHighlighted { highlightedLines = segment } else { lines = segment }
+            }
+            context.stroke(lines, with: .color(.white.opacity(0.25)), lineWidth: 1)
+            context.stroke(highlightedLines, with: .color(.accentColor), lineWidth: 1.5)
+        }
+        .frame(width: CGFloat(37 + entry.depth * 10), height: 31)
     }
 
     private func layerThumbnail(_ layer: LayerRecord) -> some View {
@@ -400,11 +488,15 @@ private struct EditorWorkspace: View {
             .onChanged { gesture in
                 guard !session.page.isEffectivelyLocked(sourceID) else { return }
                 draggingLayerID = sourceID
-                layerDropTarget = dropTarget(at: gesture.location, moving: sourceID)
+                layerDropTarget = dropTarget(at: gesture.location,
+                                             horizontalOffset: gesture.translation.width,
+                                             moving: sourceID)
             }
             .onEnded { gesture in
                 let target = session.page.isEffectivelyLocked(sourceID)
-                    ? nil : dropTarget(at: gesture.location, moving: sourceID)
+                    ? nil : dropTarget(at: gesture.location,
+                                       horizontalOffset: gesture.translation.width,
+                                       moving: sourceID)
                 draggingLayerID = nil
                 layerDropTarget = nil
                 if let target {
@@ -413,27 +505,112 @@ private struct EditorWorkspace: View {
             }
     }
 
-    private func dropTarget(at point: CGPoint, moving sourceID: UUID) -> LayerDragTarget? {
+    private func dropTarget(at point: CGPoint, horizontalOffset: CGFloat,
+                            moving sourceID: UUID) -> LayerDragTarget? {
         let moving = session.selectedLayerIDs.contains(sourceID) ? session.selectedLayerIDs : [sourceID]
-        guard let match = layerRowFrames.first(where: { $0.key != sourceID && $0.value.contains(point) }),
-              let target = session.page.layers.first(where: { $0.id == match.key }),
-              !moving.contains(where: { $0 == target.id || session.page.isDescendant(target.id, of: $0) }) else { return nil }
-        let fraction = (point.y - match.value.minY) / match.value.height
-        let placement: LayerDropPlacement
-        if target.kind == .folder && fraction >= 0.25 && fraction <= 0.75 {
-            placement = .inside
-        } else {
-            placement = fraction < 0.5 ? .above : .below
+        if let last = visibleLayerEntries.last,
+           let lastFrame = layerRowFrames[last.id],
+           point.y >= lastFrame.maxY,
+            point.y <= max(layerListViewportHeight, lastFrame.maxY + 64),
+            point.x >= lastFrame.minX - 120, point.x <= lastFrame.maxX + 120 {
+            return dropTarget(after: visibleLayerEntries.count - 1, baseDepth: 0,
+                              pointX: point.x, rowFrame: lastFrame,
+                              horizontalOffset: horizontalOffset, moving: moving,
+                              lineRowID: nil)
         }
-        let destinationParent = placement == .inside ? target.id : target.parentID
-        if let destinationParent, session.page.isEffectivelyLocked(destinationParent) { return nil }
-        return LayerDragTarget(id: match.key, placement: placement)
+        guard let match = layerRowFrames.first(where: {
+            $0.value.minY <= point.y && point.y <= $0.value.maxY &&
+            point.x >= $0.value.minX - 120 && point.x <= $0.value.maxX + 120
+        }), let index = visibleLayerEntries.firstIndex(where: { $0.id == match.key }) else { return nil }
+        let target = visibleLayerEntries[index]
+        let fraction = (point.y - match.value.minY) / match.value.height
+        let boundary: Int
+        let baseDepth: Int
+        if target.layer.kind == .folder && fraction >= 0.25 && fraction <= 0.75 {
+            boundary = index
+            baseDepth = target.depth + 1
+        } else if fraction < 0.5 {
+            boundary = index - 1
+            baseDepth = target.depth
+        } else {
+            boundary = target.layer.kind == .folder
+                ? (visibleLayerEntries.firstIndex(where: { $0.id == lastVisibleDescendant(of: target.id) }) ?? index)
+                : index
+            baseDepth = target.depth
+        }
+        return dropTarget(after: boundary, baseDepth: baseDepth,
+                          pointX: point.x, rowFrame: match.value,
+                          horizontalOffset: horizontalOffset, moving: moving,
+                          lineRowID: boundary < 0 ? target.id : visibleLayerEntries[boundary].id)
+    }
+
+    private func dropTarget(after boundary: Int, baseDepth: Int, pointX: CGFloat,
+                            rowFrame: CGRect, horizontalOffset: CGFloat,
+                            moving: [UUID], lineRowID: UUID?) -> LayerDragTarget? {
+        let entries = visibleLayerEntries
+        guard !entries.isEmpty else { return nil }
+        if boundary < 0 {
+            let first = entries[0]
+            guard !moving.contains(first.id) else { return nil }
+            return LayerDragTarget(id: first.id, placement: .above, parentID: nil,
+                                   depth: 0, lineRowID: first.id, lineAtTop: true)
+        }
+        let previous = entries[boundary]
+        let nextDepth = boundary + 1 < entries.count ? entries[boundary + 1].depth : 0
+        let maximumDepth = previous.depth + (previous.layer.kind == .folder ? 1 : 0)
+        guard nextDepth <= maximumDepth else { return nil }
+        var candidates: [LayerDragTarget] = []
+        for depth in nextDepth...maximumDepth {
+            let anchor: LayerDisplayEntry
+            let placement: LayerDropPlacement
+            let parentID: UUID?
+            if depth == previous.depth + 1 {
+                anchor = previous
+                placement = .inside
+                parentID = previous.id
+            } else {
+                let ancestors = entries.prefix(boundary + 1).filter {
+                    $0.depth == depth && ($0.id == previous.id || session.page.isDescendant(previous.id, of: $0.id))
+                }
+                guard let matchingAncestor = ancestors.last else { continue }
+                anchor = matchingAncestor
+                placement = .below
+                parentID = anchor.layer.parentID
+            }
+            guard !moving.contains(where: { $0 == anchor.id || session.page.isDescendant(anchor.id, of: $0) }),
+                  parentID.map({ !session.page.isEffectivelyLocked($0) }) ?? true else { continue }
+            candidates.append(LayerDragTarget(id: anchor.id, placement: placement, parentID: parentID,
+                                              depth: depth, lineRowID: lineRowID, lineAtTop: false))
+        }
+        guard !candidates.isEmpty else { return nil }
+        if abs(horizontalOffset) < 12 {
+            return candidates.min { abs($0.depth - baseDepth) < abs($1.depth - baseDepth) }
+        }
+        let bodyMinX = rowFrame.minX + 25
+        let bodyWidth = max(1, rowFrame.maxX - bodyMinX)
+        let fraction = min(max((pointX - bodyMinX) / bodyWidth, 0), 0.999_999)
+        return candidates[Int(fraction * CGFloat(candidates.count))]
+    }
+
+    private func lastVisibleDescendant(of id: UUID) -> UUID? {
+        guard let index = visibleLayerEntries.firstIndex(where: { $0.id == id }) else { return nil }
+        let depth = visibleLayerEntries[index].depth
+        var last = id
+        for entry in visibleLayerEntries.dropFirst(index + 1) {
+            if entry.depth <= depth { break }
+            last = entry.id
+        }
+        return last
     }
 }
 
 private struct LayerDragTarget: Equatable {
     let id: UUID
     let placement: LayerDropPlacement
+    let parentID: UUID?
+    let depth: Int
+    let lineRowID: UUID?
+    let lineAtTop: Bool
 }
 
 private struct LayerRowFrameKey: PreferenceKey {

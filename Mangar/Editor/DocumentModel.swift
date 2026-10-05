@@ -105,6 +105,35 @@ struct PageRecord: Codable, Identifiable, Equatable {
         return start..<end
     }
 
+    func movingLayers(_ requested: [UUID], relativeTo targetID: UUID,
+                      placement: LayerDropPlacement) -> [LayerRecord]? {
+        guard let target = layers.first(where: { $0.id == targetID }) else { return nil }
+        if placement == .inside && target.kind != .folder { return nil }
+        let destinationParent = placement == .inside ? targetID : target.parentID
+        if let destinationParent, isEffectivelyLocked(destinationParent) { return nil }
+        let roots = requested.filter { candidate in
+            !requested.contains { $0 != candidate && isDescendant(candidate, of: $0) }
+        }
+        guard !roots.isEmpty, roots.allSatisfy({ !isEffectivelyLocked($0) }) else { return nil }
+        let ranges = roots.compactMap(subtreeRange).sorted { $0.lowerBound < $1.lowerBound }
+        guard ranges.count == roots.count else { return nil }
+        let movingIDs = Set(ranges.flatMap { layers[$0].map(\.id) })
+        guard !movingIDs.contains(targetID) else { return nil }
+        var updated = layers.filter { !movingIDs.contains($0.id) }
+        var moving: [LayerRecord] = []
+        for range in ranges {
+            var block = Array(layers[range])
+            block[0].parentID = destinationParent
+            moving.append(contentsOf: block)
+        }
+        var remaining = self
+        remaining.layers = updated
+        guard let targetRange = remaining.subtreeRange(of: targetID) else { return nil }
+        let insertion = placement == .below ? targetRange.lowerBound : targetRange.upperBound
+        updated.insert(contentsOf: moving, at: insertion)
+        return updated == layers ? nil : updated
+    }
+
     static func blank(name: String = "第 1 页") -> PageRecord {
         PageRecord(name: name, width: CanvasConstants.defaultWidth,
                    height: CanvasConstants.defaultHeight,

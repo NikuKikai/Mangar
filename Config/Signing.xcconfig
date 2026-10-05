@@ -1,0 +1,4 @@
+// Local signing values belong in Signing.local.xcconfig, which Git ignores.
+MANGAR_DEVELOPMENT_TEAM =
+MANGAR_BUNDLE_IDENTIFIER = org.example.Mangar
+#include? "Signing.local.xcconfig"

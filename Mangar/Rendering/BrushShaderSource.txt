@@ -1,0 +1,240 @@
+#include <metal_stdlib>
+using namespace metal;
+
+struct Dab {
+    float2 center;
+    float radius;
+    float opacity;
+};
+
+struct StampUniforms {
+    float4 color;
+    float2 tileOrigin;
+    uint dabCount;
+    uint mode;
+};
+
+kernel void stampRound(texture2d<float, access::read> source [[texture(0)]],
+                       texture2d<float, access::write> output [[texture(1)]],
+                       texture2d<float, access::read> selection [[texture(2)]],
+                       constant Dab *dabs [[buffer(0)]],
+                       constant StampUniforms &u [[buffer(1)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= source.get_width() || gid.y >= source.get_height()) return;
+    float2 p = u.tileOrigin + float2(gid) + 0.5;
+    float accumulated = 0.0;
+    float mask = selection.read(gid).r;
+    for (uint i = 0; i < u.dabCount; ++i) {
+        float coverage = clamp(dabs[i].radius + 0.5 - distance(p, dabs[i].center), 0.0, 1.0);
+        float a = coverage * dabs[i].opacity * mask;
+        accumulated = 1.0 - (1.0 - accumulated) * (1.0 - a);
+    }
+    float4 old = source.read(gid);
+    if (accumulated <= 0.0) {
+        output.write(old, gid);
+        return;
+    }
+    if (u.mode == 1) {
+        output.write(old * (1.0 - accumulated), gid);
+        return;
+    }
+    float4 ink = float4(u.color.rgb * accumulated, accumulated);
+    output.write(ink + old * (1.0 - accumulated), gid);
+}
+
+kernel void stampRoundNonAccumulating(texture2d<float, access::read> base [[texture(0)]],
+                                      texture2d<float, access::read> priorCoverage [[texture(1)]],
+                                      texture2d<float, access::write> output [[texture(2)]],
+                                      texture2d<float, access::write> nextCoverage [[texture(3)]],
+                                      texture2d<float, access::read> selection [[texture(4)]],
+                                      constant Dab *dabs [[buffer(0)]],
+                                      constant StampUniforms &u [[buffer(1)]],
+                                      uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= base.get_width() || gid.y >= base.get_height()) return;
+    float2 p = u.tileOrigin + float2(gid) + 0.5;
+    float coverage = priorCoverage.read(gid).r;
+    for (uint i = 0; i < u.dabCount; ++i) {
+        float edge = clamp(dabs[i].radius + 0.5 - distance(p, dabs[i].center), 0.0, 1.0);
+        coverage = max(coverage, edge * dabs[i].opacity);
+    }
+    coverage = round(clamp(coverage, 0.0, 1.0) * 255.0) / 255.0;
+    nextCoverage.write(float4(coverage, 0.0, 0.0, 1.0), gid);
+    coverage *= selection.read(gid).r;
+    float4 old = base.read(gid);
+    if (u.mode == 1) {
+        output.write(old * (1.0 - coverage), gid);
+    } else {
+        float4 ink = float4(u.color.rgb * coverage, coverage);
+        output.write(ink + old * (1.0 - coverage), gid);
+    }
+}
+
+struct SelectionOpUniforms {
+    float4 rect;
+    float2 tileOrigin;
+    uint operation;
+    uint padding;
+};
+
+kernel void editSelection(texture2d<float, access::read> previous [[texture(0)]],
+                          texture2d<float, access::write> output [[texture(1)]],
+                          constant SelectionOpUniforms &u [[buffer(0)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    float old = previous.read(gid).r;
+    float2 pixel = u.tileOrigin + float2(gid);
+    float overlapX = max(0.0, min(pixel.x + 1.0, u.rect.z) - max(pixel.x, u.rect.x));
+    float overlapY = max(0.0, min(pixel.y + 1.0, u.rect.w) - max(pixel.y, u.rect.y));
+    float value = overlapX * overlapY;
+    if (u.operation == 1) value = max(old, value);
+    if (u.operation == 2) value = old * (1.0 - value);
+    if (u.operation == 3) value = old * value;
+    if (u.operation == 4) value = 1.0 - old;
+    output.write(float4(value, 0.0, 0.0, 1.0), gid);
+}
+
+kernel void selectionTileBounds(texture2d<float, access::read> mask [[texture(0)]],
+                                device atomic_uint *bounds [[buffer(0)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= mask.get_width() || gid.y >= mask.get_height()) return;
+    if (mask.read(gid).r <= 0.0) return;
+    atomic_fetch_min_explicit(&bounds[0], gid.x, memory_order_relaxed);
+    atomic_fetch_min_explicit(&bounds[1], gid.y, memory_order_relaxed);
+    atomic_fetch_max_explicit(&bounds[2], gid.x + 1, memory_order_relaxed);
+    atomic_fetch_max_explicit(&bounds[3], gid.y + 1, memory_order_relaxed);
+}
+
+kernel void paintTileBounds(texture2d<float, access::read> tile [[texture(0)]],
+                            device atomic_uint *bounds [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= tile.get_width() || gid.y >= tile.get_height()) return;
+    if (tile.read(gid).a <= 0.0) return;
+    atomic_fetch_min_explicit(&bounds[0], gid.x, memory_order_relaxed);
+    atomic_fetch_min_explicit(&bounds[1], gid.y, memory_order_relaxed);
+    atomic_fetch_max_explicit(&bounds[2], gid.x + 1, memory_order_relaxed);
+    atomic_fetch_max_explicit(&bounds[3], gid.y + 1, memory_order_relaxed);
+}
+
+struct QuadUniforms {
+    float2 origin;
+    float2 size;
+    float2 viewport;
+    float zoom;
+    float rotation;
+    float2 pan;
+};
+
+struct QuadOutput {
+    float4 position [[position]];
+    float2 uv;
+    float2 canvasPosition;
+};
+
+vertex QuadOutput tileVertex(uint vertexID [[vertex_id]],
+                             constant QuadUniforms &u [[buffer(0)]]) {
+    const float2 corners[6] = {
+        float2(0, 0), float2(1, 0), float2(0, 1),
+        float2(0, 1), float2(1, 0), float2(1, 1)
+    };
+    float2 uv = corners[vertexID];
+    float2 canvasPosition = u.origin + uv * u.size;
+    float2 scaled = canvasPosition * u.zoom;
+    float c = cos(u.rotation);
+    float s = sin(u.rotation);
+    float2 screen = float2(scaled.x * c - scaled.y * s,
+                           scaled.x * s + scaled.y * c) + u.pan;
+    float2 clip = float2(screen.x / u.viewport.x * 2.0 - 1.0,
+                         1.0 - screen.y / u.viewport.y * 2.0);
+    return { float4(clip, 0, 1), uv, canvasPosition };
+}
+
+fragment float4 tileFragment(QuadOutput in [[stage_in]],
+                             texture2d<float> tile [[texture(0)]]) {
+    constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::nearest);
+    return tile.sample(s, in.uv);
+}
+
+fragment float4 paperFragment(QuadOutput in [[stage_in]]) {
+    return float4(1, 1, 1, 1);
+}
+
+fragment float4 checkerFragment(QuadOutput in [[stage_in]]) {
+    int2 cell = int2(floor(in.canvasPosition / 16.0));
+    float value = ((cell.x + cell.y) & 1) == 0 ? 0.85 : 0.96;
+    return float4(value, value, value, 1.0);
+}
+
+struct SelectionOutlineUniforms {
+    float2 tileOrigin;
+    float2 canvasSize;
+    float zoom;
+    float phase;
+};
+
+float selectionValue(int2 pixel, int2 local, int direction,
+                     constant SelectionOutlineUniforms &u,
+                     texture2d<float> center, texture2d<float> left,
+                     texture2d<float> right, texture2d<float> top,
+                     texture2d<float> bottom) {
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= int(u.canvasSize.x) ||
+        pixel.y >= int(u.canvasSize.y)) return 0.0;
+    if (direction == 1) return left.read(uint2(255, local.y)).r;
+    if (direction == 2) return right.read(uint2(0, local.y)).r;
+    if (direction == 3) return top.read(uint2(local.x, 255)).r;
+    if (direction == 4) return bottom.read(uint2(local.x, 0)).r;
+    return center.read(uint2(local)).r;
+}
+
+float4 marchingAntColor(float2 screen, float phase) {
+    float stripe = floor((screen.x + screen.y) / 5.0 + phase);
+    float shade = fmod(stripe, 2.0) == 0.0 ? 1.0 : 0.0;
+    return float4(shade, shade, shade, 1.0);
+}
+
+fragment float4 selectionOutlineFragment(QuadOutput in [[stage_in]],
+    texture2d<float> center [[texture(0)]], texture2d<float> left [[texture(1)]],
+    texture2d<float> right [[texture(2)]], texture2d<float> top [[texture(3)]],
+    texture2d<float> bottom [[texture(4)]],
+    constant SelectionOutlineUniforms &u [[buffer(0)]]) {
+    int2 pixel = int2(floor(in.canvasPosition));
+    int2 local = pixel - int2(u.tileOrigin);
+    if (local.x < 0 || local.y < 0 || local.x >= 256 || local.y >= 256) discard_fragment();
+    bool inside = selectionValue(pixel, local, 0, u, center, left, right, top, bottom) > 0.5;
+    float2 fraction = in.canvasPosition - float2(pixel);
+    float distancePixels = 1e10;
+    int leftDirection = local.x == 0 ? 1 : 0;
+    int rightDirection = local.x == 255 ? 2 : 0;
+    int topDirection = local.y == 0 ? 3 : 0;
+    int bottomDirection = local.y == 255 ? 4 : 0;
+    if (inside != (selectionValue(pixel + int2(-1, 0), local + int2(-1, 0),
+                                  leftDirection, u, center, left, right, top, bottom) > 0.5))
+        distancePixels = min(distancePixels, fraction.x * u.zoom);
+    if (inside != (selectionValue(pixel + int2(1, 0), local + int2(1, 0),
+                                  rightDirection, u, center, left, right, top, bottom) > 0.5))
+        distancePixels = min(distancePixels, (1.0 - fraction.x) * u.zoom);
+    if (inside != (selectionValue(pixel + int2(0, -1), local + int2(0, -1),
+                                  topDirection, u, center, left, right, top, bottom) > 0.5))
+        distancePixels = min(distancePixels, fraction.y * u.zoom);
+    if (inside != (selectionValue(pixel + int2(0, 1), local + int2(0, 1),
+                                  bottomDirection, u, center, left, right, top, bottom) > 0.5))
+        distancePixels = min(distancePixels, (1.0 - fraction.y) * u.zoom);
+    if (distancePixels > 0.75) discard_fragment();
+    return marchingAntColor(in.position.xy, u.phase);
+}
+
+struct RectOutlineUniforms {
+    float4 rect;
+    float zoom;
+    float phase;
+};
+
+fragment float4 selectionRectOutlineFragment(QuadOutput in [[stage_in]],
+                                             constant RectOutlineUniforms &u [[buffer(0)]]) {
+    float2 p = in.canvasPosition;
+    if (p.x < u.rect.x - 1.0 || p.x > u.rect.z + 1.0 ||
+        p.y < u.rect.y - 1.0 || p.y > u.rect.w + 1.0) discard_fragment();
+    float distancePixels = min(min(abs(p.x - u.rect.x), abs(p.x - u.rect.z)),
+                               min(abs(p.y - u.rect.y), abs(p.y - u.rect.w))) * u.zoom;
+    if (distancePixels > 0.75) discard_fragment();
+    return marchingAntColor(in.position.xy, u.phase);
+}

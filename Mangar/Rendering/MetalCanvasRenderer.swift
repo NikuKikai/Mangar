@@ -59,6 +59,12 @@ private struct RectOutlineUniforms {
     var phase: Float
 }
 
+private struct GuideUniforms {
+    var rect: SIMD4<Float>
+    var zoomAndPadding: SIMD4<Float>
+    var color: SIMD4<Float>
+}
+
 @MainActor
 private final class SelectionDisplayLinkTarget: NSObject {
     weak var renderer: MetalCanvasRenderer?
@@ -80,6 +86,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private let checkerPipeline: MTLRenderPipelineState
     private let selectionOutlinePipeline: MTLRenderPipelineState
     private let selectionRectPipeline: MTLRenderPipelineState
+    private let pageGuidePipeline: MTLRenderPipelineState
     private let emptyMask: MTLTexture
     private let fullMask: MTLTexture
     private var tiles: [TileKey: MTLTexture] = [:]
@@ -99,6 +106,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     var rotation: CGFloat = 0
     var pan: CGPoint = .zero
     private var didFit = false
+    private var viewportVisible = true
 
     init(page: PageRecord) throws {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -118,7 +126,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
               let paperFragment = library.makeFunction(name: "paperFragment"),
               let checkerFragment = library.makeFunction(name: "checkerFragment"),
               let selectionOutlineFragment = library.makeFunction(name: "selectionOutlineFragment"),
-              let selectionRectFragment = library.makeFunction(name: "selectionRectOutlineFragment") else {
+              let selectionRectFragment = library.makeFunction(name: "selectionRectOutlineFragment"),
+              let pageGuideFragment = library.makeFunction(name: "pageGuideFragment") else {
             throw RendererError.unavailable
         }
         self.device = device
@@ -159,6 +168,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         self.selectionOutlinePipeline = try device.makeRenderPipelineState(descriptor: outlineDescriptor)
         outlineDescriptor.fragmentFunction = selectionRectFragment
         self.selectionRectPipeline = try device.makeRenderPipelineState(descriptor: outlineDescriptor)
+        outlineDescriptor.fragmentFunction = pageGuideFragment
+        self.pageGuidePipeline = try device.makeRenderPipelineState(descriptor: outlineDescriptor)
         self.page = page
         super.init()
     }
@@ -291,6 +302,23 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             result[key] = bytes(of: texture)
         }
         return result
+    }
+
+    var tileKeys: Set<TileKey> { Set(tiles.keys) }
+    var dirtyTileKeys: Set<TileKey> { Set(dirtyBounds.keys) }
+
+    func snapshot(keys: Set<TileKey>) -> [TileKey: Data] {
+        var result: [TileKey: Data] = [:]
+        for key in keys {
+            if let texture = tiles[key] { result[key] = bytes(of: texture) }
+        }
+        return result
+    }
+
+    func clearSavedDirtyTiles() { dirtyBounds.removeAll() }
+
+    func markAllTilesDirty() {
+        for key in tiles.keys { dirtyBounds[key] = .infinite }
     }
 
     func restore(_ snapshot: [TileKey: Data]) {
@@ -506,8 +534,15 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     private func updateSelectionAnimation() {
-        displayLink?.isPaused = selectionPreviewRect == nil &&
+        displayLink?.isPaused = !viewportVisible || (selectionPreviewRect == nil &&
             !(selection.map { $0.defaultCoverage != 0 || !$0.tileBounds.isEmpty } ?? false)
+        )
+    }
+
+    func setViewportVisible(_ visible: Bool) {
+        viewportVisible = visible
+        updateSelectionAnimation()
+        if visible { view?.setNeedsDisplay() }
     }
 
     private func selectionKeys(in rect: CGRect) -> Set<SelectionTileKey> {
@@ -769,6 +804,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        guard viewportVisible else { return }
         guard let pass = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
               let commandBuffer = queue.makeCommandBuffer() else { return }
@@ -797,8 +833,12 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         }
         for layer in page.layers where page.isEffectivelyVisible(layer.id) {
             if layer.kind == .solidWhite {
+                let bounds = layer.paperBounds ?? CGRect(x: 0, y: 0, width: page.width, height: page.height)
+                var background = paper
+                background.origin = SIMD2<Float>(Float(bounds.minX), Float(bounds.minY))
+                background.size = SIMD2<Float>(Float(bounds.width), Float(bounds.height))
                 encoder.setRenderPipelineState(paperPipeline)
-                encoder.setVertexBytes(&paper, length: MemoryLayout<QuadUniforms>.stride, index: 0)
+                encoder.setVertexBytes(&background, length: MemoryLayout<QuadUniforms>.stride, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
                 continue
             }
@@ -820,10 +860,40 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             }
         }
         if includeChecker {
+            drawPageGuides(encoder: encoder, viewport: vp, zoom: zoom,
+                           rotation: rotation, pan: pan)
             drawSelectionOutline(encoder: encoder, viewport: vp, zoom: zoom,
                                  rotation: rotation, pan: pan)
         }
         encoder.endEncoding()
+    }
+
+    private func drawPageGuides(encoder: MTLRenderCommandEncoder,
+                                viewport: SIMD2<Float>, zoom: Float,
+                                rotation: Float, pan: SIMD2<Float>) {
+        var frames: [(CGRect, SIMD4<Float>)] = []
+        if let layout = page.comicLayout {
+            frames.append((layout.bleedRect, SIMD4<Float>(0.2, 0.72, 0.83, 1)))
+            frames.append((layout.contentRect, SIMD4<Float>(0.18, 0.48, 0.95, 1)))
+        }
+        if page.isDoublePage {
+            frames.append((CGRect(x: page.contentRect.midX, y: 0, width: 0, height: CGFloat(page.height)),
+                           SIMD4<Float>(0.18, 0.48, 0.95, 1)))
+        }
+        guard !frames.isEmpty else { return }
+        encoder.setRenderPipelineState(pageGuidePipeline)
+        let padding = CGFloat(max(1, 1 / max(zoom, 0.001)))
+        for (rect, color) in frames {
+            var quad = QuadUniforms(origin: SIMD2<Float>(Float(rect.minX - padding), Float(rect.minY - padding)),
+                                    size: SIMD2<Float>(Float(rect.width + 2 * padding), Float(rect.height + 2 * padding)),
+                                    viewport: viewport, zoom: zoom, rotation: rotation, pan: pan)
+            var uniforms = GuideUniforms(rect: SIMD4<Float>(Float(rect.minX), Float(rect.minY),
+                                                             Float(rect.maxX), Float(rect.maxY)),
+                                         zoomAndPadding: SIMD4<Float>(zoom, 0, 0, 0), color: color)
+            encoder.setVertexBytes(&quad, length: MemoryLayout<QuadUniforms>.stride, index: 0)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<GuideUniforms>.stride, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
     }
 
     private func drawSelectionOutline(encoder: MTLRenderCommandEncoder,
@@ -927,9 +997,13 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                             min(1, Float(pixel[0]) / 255 / alpha))
     }
 
-    func exportPNG() throws -> Data {
+    func exportPNG(cropToContent: Bool) throws -> Data {
+        let bounds = cropToContent ? page.contentRect : CGRect(x: 0, y: 0,
+                                                                width: page.width, height: page.height)
+        let width = Int(bounds.width)
+        let height = Int(bounds.height)
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: page.width, height: page.height, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
         descriptor.storageMode = .shared
         descriptor.usage = [.renderTarget, .shaderRead]
         guard let target = device.makeTexture(descriptor: descriptor),
@@ -940,18 +1014,19 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         render(pass: pass, commandBuffer: commandBuffer,
-               viewport: CGSize(width: page.width, height: page.height),
-               zoom: 1, rotation: 0, includeChecker: false, pan: .zero)
+               viewport: CGSize(width: width, height: height),
+               zoom: 1, rotation: 0, includeChecker: false,
+               pan: SIMD2<Float>(-Float(bounds.minX), -Float(bounds.minY)))
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
-        let rowBytes = page.width * 4
-        var pixels = Data(count: rowBytes * page.height)
+        let rowBytes = width * 4
+        var pixels = Data(count: rowBytes * height)
         pixels.withUnsafeMutableBytes { raw in
             target.getBytes(raw.baseAddress!, bytesPerRow: rowBytes,
-                            from: MTLRegionMake2D(0, 0, page.width, page.height), mipmapLevel: 0)
+                            from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
         }
         let provider = CGDataProvider(data: pixels as CFData)!
-        guard let image = CGImage(width: page.width, height: page.height,
+        guard let image = CGImage(width: width, height: height,
                                   bitsPerComponent: 8, bitsPerPixel: 32,
                                   bytesPerRow: rowBytes,
                                   space: CGColorSpaceCreateDeviceRGB(),
@@ -962,6 +1037,44 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
               let png = UIImage(cgImage: image).pngData() else {
             throw RendererError.exportFailed
         }
+        return png
+    }
+
+    func projectThumbnailPNG() throws -> Data {
+        let scale = min(320.0 / Double(page.width), 320.0 / Double(page.height), 1)
+        let width = max(1, Int((Double(page.width) * scale).rounded()))
+        let height = max(1, Int((Double(page.height) * scale).rounded()))
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        descriptor.storageMode = .shared
+        descriptor.usage = [.renderTarget]
+        guard let target = device.makeTexture(descriptor: descriptor),
+              let commandBuffer = queue.makeCommandBuffer() else { throw RendererError.exportFailed }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        render(pass: pass, commandBuffer: commandBuffer,
+               viewport: CGSize(width: width, height: height), zoom: Float(scale),
+               rotation: 0, includeChecker: false, pan: .zero)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        let rowBytes = width * 4
+        var pixels = Data(count: rowBytes * height)
+        pixels.withUnsafeMutableBytes { raw in
+            target.getBytes(raw.baseAddress!, bytesPerRow: rowBytes,
+                            from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+        }
+        let provider = CGDataProvider(data: pixels as CFData)!
+        guard let image = CGImage(width: width, height: height,
+                                  bitsPerComponent: 8, bitsPerPixel: 32,
+                                  bytesPerRow: rowBytes, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)
+                                      .union(.byteOrder32Little),
+                                  provider: provider, decode: nil,
+                                  shouldInterpolate: true, intent: .defaultIntent),
+              let png = UIImage(cgImage: image).pngData() else { throw RendererError.exportFailed }
         return png
     }
 }

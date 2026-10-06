@@ -1,9 +1,42 @@
 import Foundation
+import CoreGraphics
 
 enum CanvasConstants {
     static let tileSize = 256
     static let defaultWidth = 2048
     static let defaultHeight = 2048
+}
+
+struct ComicPageLayout: Codable, Equatable {
+    var contentWidthMM: Double
+    var contentHeightMM: Double
+    var dpi: Int
+    /// Left/right canvas margin. Older pages use it on all four sides.
+    var marginMM: Double
+    var verticalMarginMM: Double? = nil
+    var bleedMM: Double = 3
+    var pageSpan: Int? = nil
+
+    private func pixels(_ millimeters: Double) -> Int {
+        Int((millimeters * Double(dpi) / 25.4).rounded())
+    }
+
+    var totalContentWidthMM: Double { contentWidthMM * Double(pageSpan ?? 1) }
+    var contentWidthPixels: Int { pixels(contentWidthMM) * (pageSpan ?? 1) }
+    var contentHeightPixels: Int { pixels(contentHeightMM) }
+    var effectiveVerticalMarginMM: Double { verticalMarginMM ?? marginMM }
+    var horizontalMarginPixels: Int { pixels(marginMM) }
+    var verticalMarginPixels: Int { pixels(effectiveVerticalMarginMM) }
+    var canvasWidthPixels: Int { contentWidthPixels + 2 * horizontalMarginPixels }
+    var canvasHeightPixels: Int { contentHeightPixels + 2 * verticalMarginPixels }
+    var contentRect: CGRect {
+        CGRect(x: horizontalMarginPixels, y: verticalMarginPixels,
+               width: contentWidthPixels, height: contentHeightPixels)
+    }
+    var bleedRect: CGRect {
+        contentRect.insetBy(dx: -CGFloat(pixels(min(bleedMM, marginMM))),
+                           dy: -CGFloat(pixels(min(bleedMM, effectiveVerticalMarginMM))))
+    }
 }
 
 struct LayerRecord: Codable, Identifiable, Equatable {
@@ -16,11 +49,13 @@ struct LayerRecord: Codable, Identifiable, Equatable {
     var isVisible: Bool = true
     var opacity: Double = 1
     var isLocked: Bool = false
+    /// Bounds of a procedural background after page merge/split.
+    var paperBounds: CGRect? = nil
 }
 
 extension LayerRecord {
     private enum CodingKeys: String, CodingKey {
-        case id, name, kind, parentID, isVisible, opacity, isLocked
+        case id, name, kind, parentID, isVisible, opacity, isLocked, paperBounds
     }
 
     init(from decoder: Decoder) throws {
@@ -32,6 +67,7 @@ extension LayerRecord {
         isVisible = try values.decode(Bool.self, forKey: .isVisible)
         opacity = try values.decode(Double.self, forKey: .opacity)
         isLocked = try values.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
+        paperBounds = try values.decodeIfPresent(CGRect.self, forKey: .paperBounds)
     }
 }
 
@@ -48,9 +84,17 @@ struct PageRecord: Codable, Identifiable, Equatable {
     var name: String
     var width: Int
     var height: Int
+    /// Nil for projects created before physical page settings were introduced.
+    var comicLayout: ComicPageLayout? = nil
+    var isSpread: Bool? = nil
     var backgroundSchemaVersion: Int? = 3
     /// Bottom layer first.
     var layers: [LayerRecord]
+
+    var contentRect: CGRect {
+        comicLayout?.contentRect ?? CGRect(x: 0, y: 0, width: width, height: height)
+    }
+    var isDoublePage: Bool { isSpread == true }
 
     /// Storage is bottom to top; the panel presents each folder before its children.
     var layerDisplayEntries: [LayerDisplayEntry] {
@@ -134,9 +178,13 @@ struct PageRecord: Codable, Identifiable, Equatable {
         return updated == layers ? nil : updated
     }
 
-    static func blank(name: String = "第 1 页") -> PageRecord {
-        PageRecord(name: name, width: CanvasConstants.defaultWidth,
-                   height: CanvasConstants.defaultHeight,
+    static func blank(name: String = "第 1 页",
+                      width: Int = CanvasConstants.defaultWidth,
+                      height: Int = CanvasConstants.defaultHeight,
+                      comicLayout: ComicPageLayout? = nil,
+                      isSpread: Bool = false) -> PageRecord {
+        PageRecord(name: name, width: width,
+                   height: height, comicLayout: comicLayout, isSpread: isSpread,
                    layers: [LayerRecord(name: "背景", kind: .solidWhite, isLocked: true),
                             LayerRecord(name: "图层 1")])
     }
@@ -147,6 +195,32 @@ struct ProjectManifest: Codable {
     var name: String = "我的漫画"
     var pageIDs: [UUID]
     var selectedPageID: UUID
+    var startingSide: PageStartSide = .right
+    var spreadPageIDs: [UUID] = []
+    var singlePageLayout: ComicPageLayout? = nil
+
+    var logicalPageCount: Int { pageIDs.reduce(0) { $0 + (spreadPageIDs.contains($1) ? 2 : 1) } }
+
+    func firstPageNumber(for id: UUID) -> Int {
+        1 + pageIDs.prefix { $0 != id }.reduce(0) { $0 + (spreadPageIDs.contains($1) ? 2 : 1) }
+    }
+}
+
+extension ProjectManifest {
+    private enum CodingKeys: String, CodingKey {
+        case formatVersion, name, pageIDs, selectedPageID, startingSide, spreadPageIDs, singlePageLayout
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        formatVersion = try values.decode(Int.self, forKey: .formatVersion)
+        name = try values.decode(String.self, forKey: .name)
+        pageIDs = try values.decode([UUID].self, forKey: .pageIDs)
+        selectedPageID = try values.decode(UUID.self, forKey: .selectedPageID)
+        startingSide = try values.decodeIfPresent(PageStartSide.self, forKey: .startingSide) ?? .right
+        spreadPageIDs = try values.decodeIfPresent([UUID].self, forKey: .spreadPageIDs) ?? []
+        singlePageLayout = try values.decodeIfPresent(ComicPageLayout.self, forKey: .singlePageLayout)
+    }
 }
 
 struct TileKey: Hashable, Codable {

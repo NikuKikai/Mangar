@@ -6,15 +6,22 @@ struct LoadedProject {
     var tiles: [TileKey: Data]
 }
 
+private struct PageState: Codable {
+    var version = 2
+    var page: PageRecord
+    var tileFiles: [String: String]
+}
+
 struct ProjectStore {
     enum StoreError: LocalizedError {
-        case unsupportedVersion
-        case missingPage
+        case unsupportedVersion, missingPage, missingTile, incompleteMigration
 
         var errorDescription: String? {
             switch self {
             case .unsupportedVersion: "工程文件版本比当前 App 新，无法安全打开。"
             case .missingPage: "找不到工程中的页面文件。"
+            case .missingTile: "工程中的绘画图块丢失或损坏。"
+            case .incompleteMigration: "旧工程迁移缺少图块数据。"
             }
         }
     }
@@ -22,51 +29,49 @@ struct ProjectStore {
     private let manager = FileManager.default
     let root: URL
 
-    init() throws {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        root = documents.appendingPathComponent("Mangar.mangar", isDirectory: true)
-    }
+    init(root: URL) { self.root = root }
 
-    func loadOrCreate() throws -> LoadedProject {
-        let manifestURL = root.appendingPathComponent("project.json")
-        guard manager.fileExists(atPath: manifestURL.path) else {
-            let page = PageRecord.blank()
-            let manifest = ProjectManifest(pageIDs: [page.id], selectedPageID: page.id)
-            try save(manifest: manifest, page: page, tiles: [:])
-            return LoadedProject(manifest: manifest, page: page, tiles: [:])
-        }
+    func load() throws -> LoadedProject {
         let manifest = try JSONDecoder().decode(ProjectManifest.self,
-                                                 from: Data(contentsOf: manifestURL))
+            from: Data(contentsOf: root.appendingPathComponent("project.json")))
         guard manifest.formatVersion == 1 else { throw StoreError.unsupportedVersion }
         let pageID = manifest.pageIDs.contains(manifest.selectedPageID)
             ? manifest.selectedPageID : manifest.pageIDs.first
         guard let pageID else { throw StoreError.missingPage }
-        let previousPage = try JSONDecoder().decode(
-            PageRecord.self,
-            from: Data(contentsOf: pageDirectory(pageID).appendingPathComponent("page.json")))
         let (page, tiles) = try loadPage(pageID)
-        if previousPage.backgroundSchemaVersion != 3 {
-            // Save any migration of a blank project created by the previous version.
-            try save(manifest: manifest, page: page, tiles: tiles)
-        }
         return LoadedProject(manifest: manifest, page: page, tiles: tiles)
     }
 
     func loadPage(_ id: UUID) throws -> (PageRecord, [TileKey: Data]) {
         let directory = pageDirectory(id)
-        let metadata = directory.appendingPathComponent("page.json")
-        guard manager.fileExists(atPath: metadata.path) else { throw StoreError.missingPage }
-        var page = try JSONDecoder().decode(PageRecord.self, from: Data(contentsOf: metadata))
-        let tileDirectory = directory.appendingPathComponent("tiles", isDirectory: true)
+        let stateURL = directory.appendingPathComponent("state.json")
+        var page: PageRecord
         var tiles: [TileKey: Data] = [:]
-        let files = (try? manager.contentsOfDirectory(at: tileDirectory, includingPropertiesForKeys: nil)) ?? []
-        for file in files where file.pathExtension == "rgba" {
-            let parts = file.deletingPathExtension().lastPathComponent.split(separator: "_")
-            guard parts.count == 3, let layerID = UUID(uuidString: String(parts[0])),
-                  let x = Int(parts[1]), let y = Int(parts[2]) else { continue }
-            let data = try Data(contentsOf: file)
-            guard data.count == CanvasConstants.tileSize * CanvasConstants.tileSize * 4 else { continue }
-            tiles[TileKey(layerID: layerID, x: x, y: y)] = data
+        if manager.fileExists(atPath: stateURL.path) {
+            let state = try JSONDecoder().decode(PageState.self, from: Data(contentsOf: stateURL))
+            guard state.version == 2 else { throw StoreError.unsupportedVersion }
+            page = state.page
+            for (name, filename) in state.tileFiles {
+                guard let key = tileKey(name), filename == URL(fileURLWithPath: filename).lastPathComponent,
+                      filename.hasSuffix(".tile") else { throw StoreError.missingTile }
+                let file = directory.appendingPathComponent("tiles", isDirectory: true)
+                    .appendingPathComponent(filename)
+                guard manager.fileExists(atPath: file.path) else { throw StoreError.missingTile }
+                tiles[key] = try TileCodec.decode(Data(contentsOf: file))
+            }
+        } else {
+            let metadata = directory.appendingPathComponent("page.json")
+            guard manager.fileExists(atPath: metadata.path) else { throw StoreError.missingPage }
+            page = try JSONDecoder().decode(PageRecord.self, from: Data(contentsOf: metadata))
+            let tileDirectory = directory.appendingPathComponent("tiles", isDirectory: true)
+            let files = (try? manager.contentsOfDirectory(at: tileDirectory,
+                                                          includingPropertiesForKeys: nil)) ?? []
+            for file in files where file.pathExtension == "rgba" {
+                guard let key = tileKey(file.deletingPathExtension().lastPathComponent) else { continue }
+                let data = try Data(contentsOf: file)
+                guard data.count == TileCodec.rawSize else { throw StoreError.missingTile }
+                tiles[key] = data
+            }
         }
         if page.backgroundSchemaVersion != 3 {
             if !page.layers.contains(where: { $0.kind == .solidWhite }) {
@@ -78,59 +83,126 @@ struct ProjectStore {
         return (page, tiles)
     }
 
-    func save(manifest: ProjectManifest, page: PageRecord,
-              tiles: [TileKey: Data]) throws {
-        try manager.createDirectory(at: root, withIntermediateDirectories: true)
-        let pages = root.appendingPathComponent("pages", isDirectory: true)
-        try manager.createDirectory(at: pages, withIntermediateDirectories: true)
-        let stage = pages.appendingPathComponent(".stage-\(UUID().uuidString)", isDirectory: true)
-        let stageTiles = stage.appendingPathComponent("tiles", isDirectory: true)
-        try manager.createDirectory(at: stageTiles, withIntermediateDirectories: true)
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(page).write(to: stage.appendingPathComponent("page.json"), options: .atomic)
-            for (key, data) in tiles where page.layers.contains(where: { $0.id == key.layerID }) {
-                let filename = "\(key.layerID.uuidString)_\(key.x)_\(key.y).rgba"
-                try data.write(to: stageTiles.appendingPathComponent(filename), options: .atomic)
-            }
-            let destination = pageDirectory(page.id)
-            let backup = pages.appendingPathComponent(".backup-\(UUID().uuidString)", isDirectory: true)
-            if manager.fileExists(atPath: destination.path) {
-                try manager.moveItem(at: destination, to: backup)
-            }
-            do {
-                try manager.moveItem(at: stage, to: destination)
-                try encoder.encode(manifest).write(to: root.appendingPathComponent("project.json"),
-                                                   options: .atomic)
-                if manager.fileExists(atPath: backup.path) {
-                    try? manager.removeItem(at: backup)
-                }
-            } catch {
-                if manager.fileExists(atPath: destination.path) {
-                    try? manager.removeItem(at: destination)
-                }
-                if manager.fileExists(atPath: backup.path) {
-                    try? manager.moveItem(at: backup, to: destination)
-                }
-                throw error
-            }
-        } catch {
-            try? manager.removeItem(at: stage)
-            throw error
-        }
+    func requiresFullSnapshot(_ pageID: UUID) -> Bool {
+        let directory = pageDirectory(pageID)
+        return manager.fileExists(atPath: directory.appendingPathComponent("page.json").path)
+            && !manager.fileExists(atPath: directory.appendingPathComponent("state.json").path)
     }
 
-    func addPage(to manifest: inout ProjectManifest) throws -> PageRecord {
-        let page = PageRecord.blank(name: "第 \(manifest.pageIDs.count + 1) 页")
-        manifest.pageIDs.append(page.id)
-        manifest.selectedPageID = page.id
-        try save(manifest: manifest, page: page, tiles: [:])
-        return page
+    var hasThumbnail: Bool {
+        manager.fileExists(atPath: root.appendingPathComponent("thumbnail.png").path)
+    }
+
+    func save(manifest: ProjectManifest, page: PageRecord, changedTiles: [TileKey: Data],
+              allTileKeys: Set<TileKey>, thumbnail: Data? = nil,
+              updateProjectThumbnail: Bool = true, updateManifest: Bool = true) throws {
+        let directory = pageDirectory(page.id)
+        let tileDirectory = directory.appendingPathComponent("tiles", isDirectory: true)
+        try manager.createDirectory(at: tileDirectory, withIntermediateDirectories: true)
+        let stateURL = directory.appendingPathComponent("state.json")
+        let previous = manager.fileExists(atPath: stateURL.path)
+            ? try JSONDecoder().decode(PageState.self, from: Data(contentsOf: stateURL)) : nil
+        if requiresFullSnapshot(page.id) && !allTileKeys.isSubset(of: Set(changedTiles.keys)) {
+            throw StoreError.incompleteMigration
+        }
+        let validLayers = Set(page.layers.map(\.id))
+        let retainedKeys = allTileKeys.filter { validLayers.contains($0.layerID) }
+        var files = previous?.tileFiles.filter { name, _ in
+            tileKey(name).map { retainedKeys.contains($0) } ?? false
+        } ?? [:]
+        if previous == nil && !retainedKeys.isSubset(of: Set(changedTiles.keys)) {
+            throw StoreError.incompleteMigration
+        }
+        for (key, raw) in changedTiles where retainedKeys.contains(key) {
+            let filename = UUID().uuidString + ".tile"
+            try TileCodec.encode(raw).write(to: tileDirectory.appendingPathComponent(filename),
+                                            options: .atomic)
+            files[tileName(key)] = filename
+        }
+        guard Set(files.keys) == Set(retainedKeys.map(tileName)) else {
+            throw StoreError.incompleteMigration
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // This one atomic file is the commit point for metadata and every tile reference.
+        try encoder.encode(PageState(page: page, tileFiles: files)).write(to: stateURL,
+                                                                          options: .atomic)
+        if updateManifest { try saveManifest(manifest) }
+        if let thumbnail {
+            try savePageThumbnail(thumbnail, pageID: page.id)
+            if updateProjectThumbnail {
+                try thumbnail.write(to: root.appendingPathComponent("thumbnail.png"), options: .atomic)
+            }
+        }
+        // Old generations remain valid until state.json has committed.
+        let referenced = Set(files.values)
+        let contents = (try? manager.contentsOfDirectory(at: tileDirectory,
+                                                          includingPropertiesForKeys: nil)) ?? []
+        for file in contents where file.pathExtension == "tile" && !referenced.contains(file.lastPathComponent) {
+            try? manager.removeItem(at: file)
+        }
+        for file in contents where file.pathExtension == "rgba" {
+            try? manager.removeItem(at: file)
+        }
+        try? manager.removeItem(at: directory.appendingPathComponent("page.json"))
+    }
+
+    func pageThumbnail(_ pageID: UUID) -> Data? {
+        try? Data(contentsOf: pageDirectory(pageID).appendingPathComponent("thumbnail.png"))
+    }
+
+    func savePageThumbnail(_ data: Data, pageID: UUID) throws {
+        try data.write(to: pageDirectory(pageID).appendingPathComponent("thumbnail.png"), options: .atomic)
+    }
+
+    func insertPage(_ page: PageRecord, at index: Int, into manifest: inout ProjectManifest,
+                    thumbnail: Data) throws {
+        var updated = manifest
+        updated.pageIDs.insert(page.id, at: index)
+        if page.isDoublePage { updated.spreadPageIDs.append(page.id) }
+        try save(manifest: updated, page: page, changedTiles: [:], allTileKeys: [],
+                 thumbnail: thumbnail, updateProjectThumbnail: false)
+        manifest = updated
+    }
+
+    func saveManifest(_ manifest: ProjectManifest) throws {
+        try JSONEncoder().encode(manifest).write(
+            to: root.appendingPathComponent("project.json"), options: .atomic)
+    }
+
+    /// New UUID directories are staged before the manifest atomically switches references.
+    func replacePages(with outputs: [ConvertedPage], removing ids: [UUID],
+                      manifest: ProjectManifest, thumbnails: [UUID: Data]) throws {
+        do {
+            for output in outputs {
+                try save(manifest: manifest, page: output.page, changedTiles: output.tiles,
+                         allTileKeys: Set(output.tiles.keys), thumbnail: thumbnails[output.page.id],
+                         updateProjectThumbnail: false, updateManifest: false)
+            }
+            try saveManifest(manifest)
+        } catch {
+            for output in outputs { try? manager.removeItem(at: pageDirectory(output.page.id)) }
+            throw error
+        }
+        for id in ids { try? manager.removeItem(at: pageDirectory(id)) }
+        if let thumbnail = thumbnails[manifest.selectedPageID] ?? pageThumbnail(manifest.selectedPageID) {
+            try? thumbnail.write(to: root.appendingPathComponent("thumbnail.png"), options: .atomic)
+        }
     }
 
     private func pageDirectory(_ id: UUID) -> URL {
         root.appendingPathComponent("pages", isDirectory: true)
             .appendingPathComponent(id.uuidString, isDirectory: true)
+    }
+
+    private func tileName(_ key: TileKey) -> String {
+        "\(key.layerID.uuidString)_\(key.x)_\(key.y)"
+    }
+
+    private func tileKey(_ name: String) -> TileKey? {
+        let parts = name.split(separator: "_")
+        guard parts.count == 3, let id = UUID(uuidString: String(parts[0])),
+              let x = Int(parts[1]), let y = Int(parts[2]) else { return nil }
+        return TileKey(layerID: id, x: x, y: y)
     }
 }

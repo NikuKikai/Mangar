@@ -164,6 +164,24 @@ fragment float4 checkerFragment(QuadOutput in [[stage_in]]) {
     return float4(value, value, value, 1.0);
 }
 
+struct GuideUniforms {
+    float4 rect;
+    float4 zoomAndPadding;
+    float4 color;
+};
+
+fragment float4 pageGuideFragment(QuadOutput in [[stage_in]],
+                                  constant GuideUniforms &u [[buffer(0)]]) {
+    float2 p = in.canvasPosition;
+    float padding = max(1.0, 1.0 / max(u.zoomAndPadding.x, 0.001));
+    if (p.x < u.rect.x - padding || p.x > u.rect.z + padding ||
+        p.y < u.rect.y - padding || p.y > u.rect.w + padding) discard_fragment();
+    float distancePixels = min(min(abs(p.x - u.rect.x), abs(p.x - u.rect.z)),
+                               min(abs(p.y - u.rect.y), abs(p.y - u.rect.w))) * u.zoomAndPadding.x;
+    if (distancePixels > 0.8) discard_fragment();
+    return u.color;
+}
+
 struct SelectionOutlineUniforms {
     float2 tileOrigin;
     float2 canvasSize;

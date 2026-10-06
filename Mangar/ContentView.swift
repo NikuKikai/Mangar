@@ -1,29 +1,259 @@
 import SwiftUI
 import UIKit
 
-struct ContentView: View {
-    @State private var session: EditorSession?
-    @State private var launchError: String?
+private struct MangarLogoMark: View {
+    var body: some View {
+        Canvas { context, size in
+            let scale = min(size.width, size.height) / 100
+            var solid = Path()
+            solid.move(to: CGPoint(x: 8, y: 92))
+            solid.addLine(to: CGPoint(x: 8, y: 43))
+            solid.addCurve(to: CGPoint(x: 70, y: 43),
+                           control1: CGPoint(x: 8, y: -5), control2: CGPoint(x: 70, y: -5))
+            solid.addLine(to: CGPoint(x: 70, y: 92))
+            solid.addLine(to: CGPoint(x: 58, y: 92))
+            solid.addLine(to: CGPoint(x: 58, y: 43))
+            solid.addCurve(to: CGPoint(x: 20, y: 43),
+                           control1: CGPoint(x: 58, y: 12), control2: CGPoint(x: 20, y: 12))
+            solid.addLine(to: CGPoint(x: 20, y: 92))
+            solid.closeSubpath()
+            context.fill(solid.applying(CGAffineTransform(scaleX: scale, y: scale)), with: .color(.white))
+
+            var outline = Path()
+            outline.move(to: CGPoint(x: 39, y: 92))
+            outline.addLine(to: CGPoint(x: 39, y: 44))
+            outline.addCurve(to: CGPoint(x: 94, y: 44),
+                             control1: CGPoint(x: 39, y: 2), control2: CGPoint(x: 94, y: 2))
+            outline.addLine(to: CGPoint(x: 94, y: 92))
+            outline.addLine(to: CGPoint(x: 82, y: 92))
+            outline.addLine(to: CGPoint(x: 82, y: 44))
+            outline.addCurve(to: CGPoint(x: 51, y: 44),
+                             control1: CGPoint(x: 82, y: 19), control2: CGPoint(x: 51, y: 19))
+            outline.addLine(to: CGPoint(x: 51, y: 92))
+            outline.closeSubpath()
+            context.stroke(outline.applying(CGAffineTransform(scaleX: scale, y: scale)),
+                           with: .color(.white), lineWidth: max(0.7, scale * 2.5))
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+private struct ExportSettingsView: View {
+    @ObservedObject var session: EditorSession
+    let close: () -> Void
+    @State private var cropToContent = true
+    @State private var preview: UIImage?
+
+    private var outputSize: CGSize {
+        cropToContent ? session.page.contentRect.size
+                      : CGSize(width: session.page.width, height: session.page.height)
+    }
+
+    private var shownPreview: UIImage? {
+        guard let preview, cropToContent, let source = preview.cgImage else { return preview }
+        let rect = session.page.contentRect
+        let sx = CGFloat(source.width) / CGFloat(session.page.width)
+        let sy = CGFloat(source.height) / CGFloat(session.page.height)
+        let crop = CGRect(x: rect.minX * sx, y: rect.minY * sy,
+                          width: rect.width * sx, height: rect.height * sy).integral
+            .intersection(CGRect(x: 0, y: 0, width: source.width, height: source.height))
+        guard let image = source.cropping(to: crop) else { return preview }
+        return UIImage(cgImage: image)
+    }
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            HStack {
+                Text("导出 PNG")
+                    .font(.system(size: 18, weight: .semibold))
+                Spacer()
+                Button(action: close) {
+                    Image(systemName: "xmark")
+                        .frame(width: 30, height: 30)
+                }
+                .help("关闭导出画面")
+                .accessibilityLabel("关闭导出画面")
+            }
+            .padding(.horizontal, 18)
+            .frame(height: 48)
+            .background(Color(red: 0.16, green: 0.17, blue: 0.18))
+            HStack(spacing: 22) {
+                ZStack {
+                    Color(red: 0.21, green: 0.22, blue: 0.23)
+                    if let image = shownPreview {
+                        Image(uiImage: image)
+                            .resizable()
+                            .interpolation(.medium)
+                            .aspectRatio(contentMode: .fit)
+                            .padding(18)
+                    } else {
+                        ProgressView()
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(Rectangle().stroke(.white.opacity(0.12), lineWidth: 1))
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("当前页 · PNG")
+                        .font(.system(size: 14, weight: .semibold))
+                    Button { cropToContent.toggle() } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: cropToContent ? "checkmark.square.fill" : "square")
+                                .foregroundStyle(cropToContent ? Color.accentColor : .secondary)
+                            Text("裁切至内容框")
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+                    }
+                    Text("输出：\(Int(outputSize.width)) × \(Int(outputSize.height)) px")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    if let layout = session.page.comicLayout {
+                        Text("内容尺寸：\(layout.totalContentWidthMM.formatted()) × \(layout.contentHeightMM.formatted()) mm · \(layout.dpi) dpi")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("辅助框线不会出现在导出的图片中。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        session.exportPNG(cropToContent: cropToContent)
+                        close()
+                    } label: {
+                        Text("导出 PNG")
+                            .frame(maxWidth: .infinity, minHeight: 32)
+                            .background(Color.accentColor)
+                    }
+                }
+                .frame(width: 255, alignment: .leading)
+            }
+            .padding(22)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(red: 0.115, green: 0.12, blue: 0.13))
+        .buttonStyle(.plain)
+        .preferredColorScheme(.dark)
+        .onAppear {
+            preview = (try? session.renderer.projectThumbnailPNG()).flatMap(UIImage.init(data:))
+        }
+    }
+}
+
+struct ContentView: View {
+    @State private var session: EditorSession?
+    @State private var currentProjectURL: URL?
+    @State private var projects: [ProjectSummary] = []
+    @State private var projectError: String?
+    @State private var showingProjectManager = true
+    @State private var currentPreview: Data?
+
+    var body: some View {
+        ZStack {
             if let session {
-                EditorWorkspace(session: session)
-            } else {
-                ContentUnavailableView("无法打开画布", systemImage: "exclamationmark.triangle",
-                                       description: Text(launchError ?? "正在加载工程…"))
+                EditorWorkspace(session: session) {
+                    currentPreview = try? session.renderer.projectThumbnailPNG()
+                    refreshProjects()
+                    showingProjectManager = true
+                }
+                .id(ObjectIdentifier(session))
+            }
+            if showingProjectManager || session == nil {
+                ProjectManagerView(projects: projects, currentProject: currentProject,
+                                   close: session == nil ? nil : { showingProjectManager = false },
+                                   open: openProject, create: createProject,
+                                   importProject: importProject, delete: deleteProject)
             }
         }
-        .task {
-            guard session == nil, launchError == nil else { return }
-            do { session = try EditorSession() }
-            catch { launchError = error.localizedDescription }
+        .onAppear { refreshProjects() }
+        .alert("项目操作失败", isPresented: Binding(
+            get: { projectError != nil },
+            set: { if !$0 { projectError = nil } })) {
+                Button("确定", role: .cancel) { projectError = nil }
+            } message: {
+                Text(projectError ?? "")
+            }
+    }
+
+    private func refreshProjects() {
+        do { projects = try ProjectLibrary().projects() }
+        catch { projectError = error.localizedDescription }
+    }
+
+    private var currentProject: ProjectSummary? {
+        guard let session, let url = currentProjectURL else { return nil }
+        let saved = projects.first { $0.id == ProjectSummary.identity(for: url) }
+        return ProjectSummary(url: url, name: session.manifest.name,
+                              pageCount: session.manifest.logicalPageCount,
+                              modifiedAt: saved?.modifiedAt ?? .now,
+                              thumbnail: currentPreview ?? saved?.thumbnail)
+    }
+
+    private func openProject(_ url: URL) {
+        if let currentProjectURL,
+           ProjectSummary.identity(for: url) == ProjectSummary.identity(for: currentProjectURL),
+           session != nil {
+            showingProjectManager = false
+            return
+        }
+        guard session?.saveNow() ?? true else { return }
+        do {
+            session = try EditorSession(projectURL: url)
+            currentProjectURL = url
+            currentPreview = nil
+            showingProjectManager = false
+        } catch {
+            projectError = error.localizedDescription
+        }
+    }
+
+    private func createProject(_ name: String, _ layout: ComicPageLayout, _ pageCount: Int,
+                                _ startingSide: PageStartSide) {
+        guard session?.saveNow() ?? true else { return }
+        do {
+            let url = try ProjectLibrary().create(name: name, layout: layout,
+                                                  pageCount: pageCount, startingSide: startingSide)
+            refreshProjects()
+            openProject(url)
+        } catch {
+            projectError = error.localizedDescription
+        }
+    }
+
+    private func importProject(_ source: URL) {
+        guard session?.saveNow() ?? true else { return }
+        do {
+            let url = try ProjectLibrary().importProject(from: source)
+            refreshProjects()
+            openProject(url)
+        } catch {
+            projectError = error.localizedDescription
+        }
+    }
+
+    private func deleteProject(_ url: URL) {
+        do {
+            try ProjectLibrary().deleteProject(at: url)
+            if let currentURL = currentProjectURL,
+               ProjectSummary.identity(for: currentURL) == ProjectSummary.identity(for: url) {
+                session = nil
+                currentProjectURL = nil
+                currentPreview = nil
+                showingProjectManager = true
+            }
+            refreshProjects()
+        } catch {
+            projectError = "删除失败：\(error.localizedDescription)"
         }
     }
 }
 
 private struct EditorWorkspace: View {
+    private enum WorkspaceView: CaseIterable {
+        case canvas, pages
+        var title: String { self == .canvas ? "画布" : "页面一览" }
+        var icon: String { self == .canvas ? "rectangle" : "rectangle.split.2x2" }
+    }
     @ObservedObject var session: EditorSession
+    let showProjects: () -> Void
     @State private var showBrushSettings = false
     @State private var showColorEditor = false
     @State private var collapsedFolders: Set<UUID> = []
@@ -31,32 +261,59 @@ private struct EditorWorkspace: View {
     @State private var layerListViewportHeight: CGFloat = 0
     @State private var draggingLayerID: UUID?
     @State private var layerDropTarget: LayerDragTarget?
+    @State private var showAppMenu = false
+    @State private var showExport = false
+    @State private var workspaceView: WorkspaceView = .canvas
 
     var body: some View {
         HStack(spacing: 0) {
             toolRail
+                .disabled(workspaceView == .pages)
                 .frame(width: 40)
                 .background(Color(red: 0.15, green: 0.16, blue: 0.17))
             Rectangle().fill(Color.black.opacity(0.45)).frame(width: 1)
             VStack(spacing: 0) {
                 toolbar
-                CanvasSurfaceRepresentable(session: session)
+                ZStack {
+                    CanvasSurfaceRepresentable(session: session)
+                        .allowsHitTesting(workspaceView == .canvas)
+                        .accessibilityHidden(workspaceView != .canvas)
+                    if workspaceView == .pages {
+                        PageOverviewView(session: session) { id in
+                            if session.selectPage(id) { workspaceView = .canvas }
+                        }
+                    }
+                }
             }
             Rectangle().fill(Color.black.opacity(0.45)).frame(width: 1)
             sidebar
+                .disabled(workspaceView == .pages)
                 .frame(width: 192)
                 .background(Color(red: 0.15, green: 0.16, blue: 0.17))
         }
         .ignoresSafeArea(edges: .bottom)
         .overlay {
             FloatingPanelOverlay(brush: $session.brush,
-                                 showsColor: showColorEditor,
-                                 showsBrush: showBrushSettings,
+                                 showsColor: showColorEditor && workspaceView == .canvas,
+                                 showsBrush: showBrushSettings && workspaceView == .canvas,
                                  closeColor: { showColorEditor = false },
                                  closeBrush: { showBrushSettings = false })
         }
+        .overlay(alignment: .topLeading) {
+            if showAppMenu {
+                appMenu.offset(x: 70, y: 34)
+            }
+        }
+        .overlay {
+            if showExport {
+                ExportSettingsView(session: session, close: { showExport = false })
+            }
+        }
         .preferredColorScheme(.dark)
         .controlSize(.mini)
+        .onChange(of: workspaceView) { _, view in
+            session.renderer.setViewportVisible(view == .canvas)
+        }
         .alert("Mangar", isPresented: Binding(
             get: { session.message != nil },
             set: { if !$0 { session.message = nil } })) {
@@ -82,7 +339,95 @@ private struct EditorWorkspace: View {
 
     private var toolbar: some View {
         HStack(spacing: 4) {
-            if session.selectedTool == .selection {
+            Button {
+                showAppMenu = false
+                showProjects()
+            } label: {
+                MangarLogoMark()
+                    .frame(width: 22, height: 22)
+                    .frame(width: 25, height: 24)
+            }
+            .help("项目管理")
+            .accessibilityLabel("项目管理")
+            Button {
+                showAppMenu.toggle()
+            } label: {
+                Image(systemName: "line.3.horizontal")
+                    .frame(width: 22, height: 24)
+            }
+            .help("应用菜单")
+            .accessibilityLabel("应用菜单")
+            Button { session.saveNow() } label: {
+                Image(systemName: "square.and.arrow.down")
+                    .frame(width: 22, height: 24)
+                    .overlay(alignment: .topTrailing) {
+                        if session.needsSave {
+                            Circle().fill(Color.orange)
+                                .frame(width: 5, height: 5)
+                        }
+                    }
+            }
+            .keyboardShortcut("s", modifiers: [.command])
+            .help(session.needsSave ? "保存项目（有未保存更改）" : "保存项目")
+            .accessibilityLabel("保存项目")
+            Button {
+                session.undo()
+                if workspaceView == .pages { session.refreshCurrentPageThumbnail() }
+            } label: {
+                Image(systemName: "arrow.uturn.backward").frame(width: 22, height: 24)
+            }
+            .disabled(!session.canUndo)
+            .help("撤销")
+            Button {
+                session.redo()
+                if workspaceView == .pages { session.refreshCurrentPageThumbnail() }
+            } label: {
+                Image(systemName: "arrow.uturn.forward").frame(width: 22, height: 24)
+            }
+            .disabled(!session.canRedo)
+            .help("重做")
+            Rectangle().fill(.white.opacity(0.18))
+                .frame(width: 1, height: 18).padding(.horizontal, 3)
+            HStack(spacing: 1) {
+                ForEach(WorkspaceView.allCases, id: \.self) { view in
+                    Button {
+                        guard view != workspaceView else { return }
+                        session.endStroke()
+                        session.releaseModifiers()
+                        showAppMenu = false
+                        if view == .pages { session.refreshCurrentPageThumbnail() }
+                        workspaceView = view
+                    } label: {
+                        Image(systemName: view.icon)
+                            .frame(width: 27, height: 25)
+                            .background(workspaceView == view ? Color.white.opacity(0.14) : .clear)
+                            .contentShape(Rectangle())
+                    }
+                    .help(view.title)
+                    .accessibilityLabel(view.title)
+                    .accessibilityAddTraits(workspaceView == view ? [.isSelected] : [])
+                }
+            }
+            .overlay(Rectangle().stroke(.white.opacity(0.16), lineWidth: 1))
+            Spacer(minLength: 8)
+            if workspaceView == .pages {
+                Text("\(session.manifest.logicalPageCount) 页")
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 1) {
+                    ForEach(PageStartSide.allCases, id: \.self) { side in
+                        Button { session.setStartingSide(side) } label: {
+                            Text(side.title)
+                                .font(.system(size: 11))
+                                .padding(.horizontal, 6).frame(height: 25)
+                                .background(session.manifest.startingSide == side
+                                            ? Color.white.opacity(0.14) : .clear)
+                                .contentShape(Rectangle())
+                        }
+                        .accessibilityAddTraits(session.manifest.startingSide == side ? [.isSelected] : [])
+                    }
+                }
+                .overlay(Rectangle().stroke(.white.opacity(0.16), lineWidth: 1))
+            } else if session.selectedTool == .selection {
                 Image(systemName: "rectangle.dashed")
                 Text("矩形选区")
                 Text("⇧追加  ⌥减去  ⇧⌥相交")
@@ -108,25 +453,40 @@ private struct EditorWorkspace: View {
                     Image(systemName: "slider.horizontal.3").frame(width: 22, height: 24)
                 }
             }
-            Spacer()
-            Button { session.undo() } label: {
-                Image(systemName: "arrow.uturn.backward").frame(width: 22, height: 24)
-            }
-                .disabled(!session.canUndo)
-            Button { session.redo() } label: {
-                Image(systemName: "arrow.uturn.forward").frame(width: 22, height: 24)
-            }
-                .disabled(!session.canRedo)
-            Button { session.exportPNG() } label: {
-                Image(systemName: "square.and.arrow.up").frame(width: 22, height: 24)
-            }
-            .help("导出当前页 PNG")
         }
         .font(.system(size: 13))
         .buttonStyle(.plain)
         .padding(.horizontal, 4)
         .frame(height: 34)
         .background(Color(red: 0.18, green: 0.19, blue: 0.20))
+    }
+
+    private var appMenu: some View {
+        VStack(spacing: 0) {
+            Button {
+                showAppMenu = false
+                showProjects()
+            } label: {
+                Label("项目管理", systemImage: "square.grid.2x2")
+                    .frame(maxWidth: .infinity, minHeight: 27, alignment: .leading)
+            }
+            Rectangle().fill(.white.opacity(0.12)).frame(height: 1)
+                .padding(.vertical, 3)
+            Button {
+                showAppMenu = false
+                showExport = true
+            } label: {
+                Label("导出当前页 PNG", systemImage: "square.and.arrow.up")
+                    .frame(maxWidth: .infinity, minHeight: 27, alignment: .leading)
+            }
+        }
+        .font(.system(size: 12))
+        .buttonStyle(.plain)
+        .padding(5)
+        .frame(width: 174)
+        .background(Color(red: 0.16, green: 0.17, blue: 0.18))
+        .overlay(Rectangle().stroke(.white.opacity(0.25), lineWidth: 1))
+        .shadow(color: .black.opacity(0.45), radius: 8, y: 4)
     }
 
     private var toolRail: some View {
@@ -183,33 +543,6 @@ private struct EditorWorkspace: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(session.manifest.name)
-                .font(.system(size: 13, weight: .semibold))
-                .padding(.horizontal, 5)
-                .frame(height: 34, alignment: .leading)
-            HStack {
-                Text("页面")
-                    .font(.system(size: 11, weight: .semibold))
-                Spacer()
-                Button { session.addPage() } label: {
-                    Image(systemName: "plus").frame(width: 22, height: 22)
-                }
-            }
-            .padding(.horizontal, 4)
-            .frame(height: 27)
-            ScrollView(.horizontal) {
-                HStack(spacing: 2) {
-                    ForEach(Array(session.manifest.pageIDs.enumerated()), id: \.element) { index, id in
-                        Button("\(index + 1)") { session.selectPage(id) }
-                            .font(.system(size: 11, weight: .medium))
-                            .frame(width: 25, height: 22)
-                            .background(id == session.page.id ? Color.gray.opacity(0.45) : .clear)
-                    }
-                }
-                .padding(.horizontal, 3)
-            }
-            .frame(height: 25)
-            Divider()
             layerControls
             layerList
         }

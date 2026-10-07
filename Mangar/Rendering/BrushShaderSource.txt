@@ -256,3 +256,89 @@ fragment float4 selectionRectOutlineFragment(QuadOutput in [[stage_in]],
     if (distancePixels > 0.75) discard_fragment();
     return marchingAntColor(in.position.xy, u.phase);
 }
+
+// Programmable blending reads premultiplied destination color from tile memory.
+struct LayerCompositeUniforms {
+    float opacity;
+    uint mode;
+    uint solid;
+    uint padding;
+    float4 tone; // period in canvas pixels, angle in radians, density, enabled
+    float4 canvasMap; // cos(rotation)/zoom, sin(rotation)/zoom, view pan x/y
+};
+struct LayerCompositeOutput {
+    float4 color [[color(0), raster_order_group(0)]];
+};
+float3 layerBlendColor(float3 b, float3 s, uint mode) {
+    switch (mode) {
+        case 1: return b * s;
+        case 2: return b + s - b * s;
+        case 3: return select(2.0 * b * s, 1.0 - 2.0 * (1.0 - b) * (1.0 - s), b > 0.5);
+        case 4: return min(b, s);
+        case 5: return max(b, s);
+        case 6: {
+            float3 d = select(((16.0 * b - 12.0) * b + 4.0) * b, sqrt(b), b > 0.25);
+            return select(b - (1.0 - 2.0 * s) * b * (1.0 - b),
+                          b + (2.0 * s - 1.0) * (d - b), s > 0.5);
+        }
+        case 7: return select(2.0 * b * s, 1.0 - 2.0 * (1.0 - b) * (1.0 - s), s > 0.5);
+        case 8: return abs(b - s);
+        case 9: return min(float3(1.0), b + s);
+        default: return s;
+    }
+}
+float4 compositeLayerColor(float4 source, float4 destination, constant LayerCompositeUniforms &u) {
+    source *= u.opacity;
+    float3 b = destination.rgb / max(destination.a, 0.000001);
+    float3 s = source.rgb / max(source.a, 0.000001);
+    float3 blended = layerBlendColor(b, s, u.mode);
+    float3 rgb = (1.0 - source.a) * destination.rgb +
+                 (1.0 - destination.a) * source.rgb + source.a * destination.a * blended;
+    return float4(rgb, source.a + destination.a * (1.0 - source.a));
+}
+float4 applyLayerTone(float4 source, float2 screen, constant LayerCompositeUniforms &u) {
+    if (u.tone.w < 0.5) return source;
+    float2 delta = screen - u.canvasMap.zw;
+    float2 canvas = float2(delta.x * u.canvasMap.x + delta.y * u.canvasMap.y,
+                          -delta.x * u.canvasMap.y + delta.y * u.canvasMap.x);
+    float c = cos(u.tone.y), s = sin(u.tone.y);
+    float2 grid = float2(canvas.x * c + canvas.y * s, -canvas.x * s + canvas.y * c) / u.tone.x;
+    float distance = length(fract(grid) - 0.5);
+    // Uniform scale gives an analytic one-screen-pixel footprint. Unlike quad
+    // derivatives, this stays identical when panning by an odd pixel offset.
+    float footprint = length(u.canvasMap.xy) / u.tone.x;
+    float aa = max(footprint, 0.0001);
+    float3 straight = source.rgb / max(source.a, 0.000001);
+    float luminance = dot(straight, float3(0.2126, 0.7152, 0.0722));
+    float coverage = saturate((1.0 - luminance) * source.a * u.tone.z);
+    if (coverage <= 0.0) return float4(0.0);
+    if (coverage >= 1.0) return float4(0.0, 0.0, 0.0, 1.0);
+    // Circular dots grow into the cell corners at high concentrations.
+    float radius = coverage <= 0.785398 ? sqrt(coverage / 3.141593) :
+        mix(0.5, 0.707107, (coverage - 0.785398) / (1.0 - 0.785398));
+    float mask = 1.0 - smoothstep(radius - aa * 0.5, radius + aa * 0.5, distance);
+    // Below screen resolution, average coverage instead of producing moire.
+    mask = mix(mask, coverage, smoothstep(0.6, 1.2, footprint));
+    return float4(0.0, 0.0, 0.0, mask);
+}
+
+fragment LayerCompositeOutput layerCompositeFragment(
+    QuadOutput in [[stage_in]], texture2d<float> tile [[texture(0)]],
+    constant LayerCompositeUniforms &u [[buffer(0)]],
+    float4 destination [[color(0), raster_order_group(0)]]) {
+    constexpr sampler samplerNearest(coord::normalized, address::clamp_to_edge, filter::nearest);
+    float4 source = u.solid != 0 ? float4(1.0) : tile.sample(samplerNearest, in.uv);
+    source = applyLayerTone(source, in.position.xy, u);
+    return { compositeLayerColor(source, destination, u) };
+}
+// Compatibility path: source tiles never overlap within a layer, so one immutable
+// backdrop copy per layer is sufficient on GPUs without raster order groups.
+fragment float4 layerCompositeFallbackFragment(
+    QuadOutput in [[stage_in]], texture2d<float> tile [[texture(0)]],
+    texture2d<float> backdrop [[texture(1)]],
+    constant LayerCompositeUniforms &u [[buffer(0)]]) {
+    constexpr sampler samplerNearest(coord::normalized, address::clamp_to_edge, filter::nearest);
+    float4 source = u.solid != 0 ? float4(1.0) : tile.sample(samplerNearest, in.uv);
+    source = applyLayerTone(source, in.position.xy, u);
+    return compositeLayerColor(source, backdrop.read(uint2(in.position.xy)), u);
+}

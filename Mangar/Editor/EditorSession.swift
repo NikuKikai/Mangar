@@ -7,7 +7,11 @@ final class EditorSession: ObservableObject {
     @Published private(set) var page: PageRecord
     @Published private(set) var manifest: ProjectManifest
     @Published private(set) var selectedLayerIDs: [UUID]
-    @Published var brush = RoundBrush()
+    @Published var brush = AppToolPreferences.loadBrush() {
+        didSet {
+            if brush != oldValue { AppToolPreferences.saveBrush(brush) }
+        }
+    }
     @Published var selectedTool: DrawingTool = .brush
     @Published var activeModifiers: Set<EditorModifier> = []
     @Published var message: String?
@@ -22,6 +26,8 @@ final class EditorSession: ObservableObject {
     private var activeStroke: StrokeCommand?
     private var selectionStart: CGPoint?
     private var selectionMode: SelectionCombineMode = .replace
+    private var layerPropertyOriginal: [LayerRecord]?
+    private var layerPropertyTargets: Set<UUID> = []
 
     init(projectURL: URL) throws {
         let store = ProjectStore(root: projectURL)
@@ -177,6 +183,72 @@ final class EditorSession: ObservableObject {
         }
     }
 
+    var selectedToneWillEnable: Bool {
+        !selectedLayers.allSatisfy { $0.tone?.isEnabled == true }
+    }
+
+    func toggleSelectedTone() {
+        guard !selectedLayerIDs.isEmpty else { return }
+        endLayerPropertyEdit()
+        let enabled = selectedToneWillEnable
+        let ids = Set(selectedLayerIDs)
+        var updated = page.layers
+        for index in updated.indices where ids.contains(updated[index].id) {
+            var tone = updated[index].tone ?? LayerToneEffect()
+            tone.isEnabled = enabled
+            updated[index].tone = tone
+        }
+        perform(.replaceLayerStack(updated))
+    }
+
+    func previewLayerTone(frequency: Double? = nil, angle: Double? = nil, density: Double? = nil) {
+        previewLayerProperties { layer in
+            var tone = layer.tone ?? LayerToneEffect(isEnabled: false)
+            if let frequency { tone.frequency = min(120, max(10, frequency)) }
+            if let angle { tone.angle = min(180, max(0, angle)) }
+            if let density { tone.density = min(1, max(0, density)) }
+            layer.tone = tone
+        }
+    }
+
+    func beginLayerPropertyEdit(_ id: UUID) {
+        guard layerPropertyOriginal == nil, page.layers.contains(where: { $0.id == id }) else { return }
+        endStroke()
+        layerPropertyOriginal = page.layers
+        layerPropertyTargets = Set(selectedLayerIDs.contains(id) ? selectedLayerIDs : [id])
+    }
+
+    func previewLayerOpacity(_ opacity: Double) {
+        previewLayerProperties { $0.opacity = min(1, max(0, opacity)) }
+    }
+
+    func previewLayerBlendMode(_ mode: LayerBlendMode) {
+        previewLayerProperties { $0.blendMode = mode }
+    }
+
+    private func previewLayerProperties(_ edit: (inout LayerRecord) -> Void) {
+        guard layerPropertyOriginal != nil else { return }
+        var updated = page.layers
+        for index in updated.indices where layerPropertyTargets.contains(updated[index].id) {
+            edit(&updated[index])
+        }
+        guard updated != page.layers else { return }
+        page.layers = updated
+        renderer.page = page
+        renderer.view?.setNeedsDisplay()
+    }
+
+    func endLayerPropertyEdit(commit: Bool = true) {
+        guard let original = layerPropertyOriginal else { return }
+        let updated = page.layers
+        layerPropertyOriginal = nil
+        layerPropertyTargets = []
+        page.layers = original
+        renderer.page = page
+        if commit, updated != original { perform(.replaceLayerStack(updated)) }
+        else { renderer.view?.setNeedsDisplay() }
+    }
+
     func addLayer() {
         insertLayer(kind: .paint)
     }
@@ -260,6 +332,7 @@ final class EditorSession: ObservableObject {
     }
 
     func undo() {
+        endLayerPropertyEdit()
         guard history.canUndo else { return }
         let command = history.commands[history.cursor - 1]
         history.cursor -= 1
@@ -271,6 +344,7 @@ final class EditorSession: ObservableObject {
     }
 
     func redo() {
+        endLayerPropertyEdit()
         guard history.canRedo else { return }
         let command = history.commands[history.cursor]
         history.cursor += 1
@@ -283,6 +357,7 @@ final class EditorSession: ObservableObject {
 
     @discardableResult
     func saveNow() -> Bool {
+        endLayerPropertyEdit()
         if activeStroke != nil { endStroke() }
         return persist()
     }
@@ -407,6 +482,7 @@ final class EditorSession: ObservableObject {
 
     @discardableResult
     func selectPage(_ id: UUID) -> Bool {
+        endLayerPropertyEdit()
         guard manifest.pageIDs.contains(id) else { return false }
         guard id != page.id else { return true }
         cancelStroke()
@@ -476,6 +552,7 @@ final class EditorSession: ObservableObject {
     }
 
     private func perform(_ command: EditCommand) {
+        endLayerPropertyEdit()
         if history.cursor < history.commands.count {
             history.commands.removeSubrange(history.cursor...)
         }
@@ -569,6 +646,7 @@ final class EditorSession: ObservableObject {
 
     private func switchTo(page newPage: PageRecord, tiles: [TileKey: Data],
                           manifest newManifest: ProjectManifest) {
+        endLayerPropertyEdit(commit: false)
         manifest = newManifest
         page = newPage
         renderer.page = newPage

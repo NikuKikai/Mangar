@@ -14,12 +14,22 @@ struct CanvasSurfaceRepresentable: UIViewRepresentable {
 
     func updateUIView(_ uiView: CanvasSurface, context: Context) {
         uiView.session = session
+        uiView.refreshBrushCursor()
         uiView.setNeedsDisplay()
     }
 }
 
 final class CanvasSurface: MTKView {
-    weak var session: EditorSession?
+    weak var session: EditorSession? {
+        didSet {
+            if oldValue !== session { hideBrushCursor() }
+        }
+    }
+    private let cursorOutline = CAShapeLayer()
+    private let cursorHighlight = CAShapeLayer()
+    private var hoverPoint: CGPoint?
+    private var contactPoint: CGPoint?
+    private var contactPressure: CGFloat = 1
     private var pencilTouch: UITouch?
     private var selectionTouch: UITouch?
     private var pickingTouch: UITouch?
@@ -39,6 +49,20 @@ final class CanvasSurface: MTKView {
     override init(frame: CGRect, device: MTLDevice?) {
         super.init(frame: frame, device: device)
         isMultipleTouchEnabled = true
+        cursorOutline.fillColor = UIColor.clear.cgColor
+        cursorOutline.strokeColor = UIColor.black.cgColor
+        cursorOutline.lineWidth = 2
+        cursorHighlight.fillColor = UIColor.clear.cgColor
+        cursorHighlight.strokeColor = UIColor.white.cgColor
+        cursorHighlight.lineWidth = 1
+        layer.addSublayer(cursorOutline)
+        layer.addSublayer(cursorHighlight)
+        let hover = UIHoverGestureRecognizer(target: self, action: #selector(pencilHover(_:)))
+        hover.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+        hover.cancelsTouchesInView = false
+        addGestureRecognizer(hover)
+        NotificationCenter.default.addObserver(self, selector: #selector(hideBrushCursor),
+            name: UIApplication.willResignActiveNotification, object: nil)
     }
 
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -46,6 +70,70 @@ final class CanvasSurface: MTKView {
     override func layoutSubviews() {
         super.layoutSubviews()
         session?.renderer.fitIfNeeded(viewSize: bounds.size)
+        refreshBrushCursor()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { hideBrushCursor() }
+    }
+
+    @objc private func pencilHover(_ gesture: UIHoverGestureRecognizer) {
+        switch gesture.state {
+        case .began, .changed:
+            hoverPoint = gesture.location(in: self)
+        default:
+            hoverPoint = nil
+        }
+        refreshBrushCursor()
+    }
+
+    @objc private func hideBrushCursor() {
+        hoverPoint = nil
+        contactPoint = nil
+        refreshBrushCursor()
+    }
+
+    /// Core Animation composites the cursor above Metal; it never enters page pixels.
+    func refreshBrushCursor() {
+        let position = contactPoint ?? hoverPoint
+        let radius: CGFloat
+        if let session, let position,
+           session.selectedTool != .selection,
+           !session.activeModifiers.contains(.option), pickingTouch == nil,
+           bounds.contains(position),
+           session.renderer.isInsideCanvas(session.renderer.canvasPoint(from: position)) {
+            let tipRadius = contactPoint != nil ?
+                (session.renderer.previewTipRadius ?? max(0.5, CGFloat(session.brush.size) * max(0.05, contactPressure) / 2)) :
+                max(0.5, CGFloat(session.brush.size) / 2)
+            radius = tipRadius * session.renderer.zoom
+        } else {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            cursorOutline.isHidden = true
+            cursorHighlight.isHidden = true
+            CATransaction.commit()
+            return
+        }
+        guard let position else { return }
+        let path = UIBezierPath(ovalIn: CGRect(x: -radius, y: -radius,
+                                               width: radius * 2, height: radius * 2)).cgPath
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for cursor in [cursorOutline, cursorHighlight] {
+            cursor.contentsScale = contentScaleFactor
+            cursor.path = path
+            cursor.position = position
+            cursor.isHidden = false
+        }
+        CATransaction.commit()
+    }
+
+    private func updateContactCursor(_ touch: UITouch) {
+        hoverPoint = nil
+        contactPoint = touch.preciseLocation(in: self)
+        contactPressure = pressure(for: touch)
+        refreshBrushCursor()
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -74,6 +162,7 @@ final class CanvasSurface: MTKView {
            session.selectedTool == .selection,
            let pencil = touches.first(where: { $0.type == .pencil }) {
             selectionTouch = pencil
+            hideBrushCursor()
             session.beginSelection(at: session.renderer.canvasPoint(from: pencil.preciseLocation(in: self)),
                                    shift: shiftDown, option: optionDown)
             return
@@ -81,6 +170,7 @@ final class CanvasSurface: MTKView {
         if session.selectedTool != .selection, pickingTouch == nil, optionDown,
            let pencil = touches.first(where: { $0.type == .pencil }) {
             pickingTouch = pencil
+            hideBrushCursor()
             let point = session.renderer.canvasPoint(from: pencil.preciseLocation(in: self))
             session.pickColor(at: point)
             return
@@ -99,6 +189,7 @@ final class CanvasSurface: MTKView {
             transformStart = nil
             let point = session.renderer.canvasPoint(from: pencil.preciseLocation(in: self))
             session.beginStroke(at: point, pressure: pressure(for: pencil))
+            updateContactCursor(pencil)
             return
         }
         guard pencilTouch == nil else { return }
@@ -142,6 +233,7 @@ final class CanvasSurface: MTKView {
                 let point = session.renderer.canvasPoint(from: sample.preciseLocation(in: self))
                 session.appendStroke(at: point, pressure: pressure(for: sample))
             }
+            updateContactCursor(pencil)
         } else if pencilTouch == nil {
             updateFingerTransform()
         }
@@ -170,6 +262,8 @@ final class CanvasSurface: MTKView {
             session.appendStroke(at: point, pressure: pressure(for: pencil))
             session.endStroke()
             pencilTouch = nil
+            contactPoint = nil
+            refreshBrushCursor()
         }
         removeEndedFingers(touches)
     }
@@ -188,6 +282,7 @@ final class CanvasSurface: MTKView {
         if let pencil = pencilTouch, touches.contains(pencil) {
             session?.cancelStroke()
             pencilTouch = nil
+            hideBrushCursor()
         }
         removeEndedFingers(touches)
     }
@@ -198,6 +293,7 @@ final class CanvasSurface: MTKView {
     }
 
     private func beginFingerTransform() {
+        if !fingerTouches.isEmpty { hideBrushCursor() }
         guard let renderer = session?.renderer else { return }
         if fingerTouches.count >= 2 {
             let first = fingerTouches[0].location(in: self)
@@ -234,6 +330,7 @@ final class CanvasSurface: MTKView {
             renderer.pan = CGPoint(x: panStartOffset.x + point.x - panStartPoint.x,
                                    y: panStartOffset.y + point.y - panStartPoint.y)
         }
+        refreshBrushCursor()
         setNeedsDisplay()
     }
 

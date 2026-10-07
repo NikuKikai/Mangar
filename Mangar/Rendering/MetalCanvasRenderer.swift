@@ -25,6 +25,15 @@ private struct QuadUniforms {
     var pan: SIMD2<Float>
 }
 
+private struct LayerCompositeUniforms {
+    var opacity: Float
+    var mode: UInt32
+    var solid: UInt32 = 0
+    var padding: UInt32 = 0
+    var tone: SIMD4<Float> = .zero
+    var canvasMap: SIMD4<Float> = .zero
+}
+
 struct SelectionTileKey: Hashable {
     var x: Int
     var y: Int
@@ -81,6 +90,10 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private let selectionEditPipeline: MTLComputePipelineState
     private let selectionBoundsPipeline: MTLComputePipelineState
     private let paintBoundsPipeline: MTLComputePipelineState
+    private let usesRasterOrderGroups: Bool
+    private var groupBackdrops: [Int: MTLTexture] = [:]
+    private let layerCompositePipeline: MTLRenderPipelineState
+    private var groupTargets: [Int: MTLTexture] = [:]
     private let tilePipeline: MTLRenderPipelineState
     private let paperPipeline: MTLRenderPipelineState
     private let checkerPipeline: MTLRenderPipelineState
@@ -93,6 +106,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private var previewTiles: [TileKey: MTLTexture] = [:]
     private var previewCoverageTiles: [TileKey: MTLTexture] = [:]
     private var previewDabCount = 0
+    private(set) var previewTipRadius: CGFloat?
     private var thumbnailCache: [UUID: UIImage] = [:]
     private var emptyThumbnailLayers: Set<UUID> = []
     private(set) var selection: SelectionSnapshot?
@@ -114,7 +128,11 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
               let shaderURL = Bundle.main.url(forResource: "BrushShaderSource", withExtension: "txt") else {
             throw RendererError.unavailable
         }
-        let shaderSource = try String(contentsOf: shaderURL, encoding: .utf8)
+        let usesRasterOrderGroups = device.areRasterOrderGroupsSupported
+        var shaderSource = try String(contentsOf: shaderURL, encoding: .utf8)
+        if !usesRasterOrderGroups {
+            shaderSource = shaderSource.replacingOccurrences(of: ", raster_order_group(0)", with: "")
+        }
         let library = try device.makeLibrary(source: shaderSource, options: nil)
         guard let stamp = library.makeFunction(name: "stampRound"),
               let nonAccumulatingStamp = library.makeFunction(name: "stampRoundNonAccumulating"),
@@ -123,6 +141,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
               let paintBounds = library.makeFunction(name: "paintTileBounds"),
               let vertex = library.makeFunction(name: "tileVertex"),
               let tileFragment = library.makeFunction(name: "tileFragment"),
+              let layerCompositeFragment = library.makeFunction(name: usesRasterOrderGroups
+                ? "layerCompositeFragment" : "layerCompositeFallbackFragment"),
               let paperFragment = library.makeFunction(name: "paperFragment"),
               let checkerFragment = library.makeFunction(name: "checkerFragment"),
               let selectionOutlineFragment = library.makeFunction(name: "selectionOutlineFragment"),
@@ -131,6 +151,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             throw RendererError.unavailable
         }
         self.device = device
+        self.usesRasterOrderGroups = usesRasterOrderGroups
         self.queue = queue
         self.stampPipeline = try device.makeComputePipelineState(function: stamp)
         self.nonAccumulatingStampPipeline = try device.makeComputePipelineState(function: nonAccumulatingStamp)
@@ -153,6 +174,12 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         attachment.sourceAlphaBlendFactor = .one
         attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         self.tilePipeline = try device.makeRenderPipelineState(descriptor: tileDescriptor)
+
+        let compositeDescriptor = MTLRenderPipelineDescriptor()
+        compositeDescriptor.vertexFunction = vertex
+        compositeDescriptor.fragmentFunction = layerCompositeFragment
+        compositeDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        self.layerCompositePipeline = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
 
         let paperDescriptor = MTLRenderPipelineDescriptor()
         paperDescriptor.vertexFunction = vertex
@@ -224,6 +251,18 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         if let view { fitIfNeeded(viewSize: view.bounds.size) }
     }
 
+    /// Remove rotation around the visible viewport's center, preserving its canvas anchor and zoom.
+    func straightenViewport() {
+        guard let view, view.bounds.width > 0, view.bounds.height > 0 else { return }
+        let center = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+        let anchor = canvasPoint(from: center)
+        rotation = 0
+        let mapped = rotatedScaledPoint(anchor)
+        pan = CGPoint(x: center.x - mapped.x, y: center.y - mapped.y)
+        (view as? CanvasSurface)?.refreshBrushCursor()
+        view.setNeedsDisplay()
+    }
+
     func canvasPoint(from viewPoint: CGPoint) -> CGPoint {
         let dx = viewPoint.x - pan.x
         let dy = viewPoint.y - pan.y
@@ -246,6 +285,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func clearPreview() {
+        previewTipRadius = nil
         previewTiles.removeAll()
         previewCoverageTiles.removeAll()
         previewDabCount = 0
@@ -254,6 +294,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
 
     func preview(_ stroke: StrokeCommand) {
         let allDabs = makeDabs(stroke)
+        previewTipRadius = allDabs.last.map { CGFloat($0.radius) }
         if allDabs.count < previewDabCount {
             previewTiles.removeAll()
             previewCoverageTiles.removeAll()
@@ -272,6 +313,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func commit(_ stroke: StrokeCommand) {
+        previewTipRadius = nil
         thumbnailCache.removeValue(forKey: stroke.layerID)
         emptyThumbnailLayers.remove(stroke.layerID)
         previewTiles.removeAll()
@@ -322,6 +364,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func restore(_ snapshot: [TileKey: Data]) {
+        previewTipRadius = nil
         thumbnailCache.removeAll()
         emptyThumbnailLayers.removeAll()
         tiles.removeAll()
@@ -821,7 +864,12 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private func render(pass: MTLRenderPassDescriptor, commandBuffer: MTLCommandBuffer,
                         viewport: CGSize, zoom: Float, rotation: Float,
                         includeChecker: Bool, pan: SIMD2<Float>) {
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+        let needsCompositing = page.layers.contains { $0.opacity != 1 || $0.blendMode != .normal || $0.tone?.isEnabled == true }
+        let composite = needsCompositing ? composeGroup(parentID: nil, depth: 0,
+            commandBuffer: commandBuffer, viewport: viewport, zoom: zoom,
+            rotation: rotation, pan: pan) : nil
+        guard !needsCompositing || composite != nil,
+              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
         let vp = SIMD2<Float>(Float(viewport.width), Float(viewport.height))
         var paper = QuadUniforms(origin: .zero,
                                  size: SIMD2<Float>(Float(page.width), Float(page.height)),
@@ -831,6 +879,14 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             encoder.setVertexBytes(&paper, length: MemoryLayout<QuadUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         }
+        if let composite {
+            encoder.setRenderPipelineState(tilePipeline)
+            var screen = QuadUniforms(origin: .zero, size: vp, viewport: vp,
+                                      zoom: 1, rotation: 0, pan: .zero)
+            encoder.setVertexBytes(&screen, length: MemoryLayout<QuadUniforms>.stride, index: 0)
+            encoder.setFragmentTexture(composite, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        } else {
         for layer in page.layers where page.isEffectivelyVisible(layer.id) {
             if layer.kind == .solidWhite {
                 let bounds = layer.paperBounds ?? CGRect(x: 0, y: 0, width: page.width, height: page.height)
@@ -859,6 +915,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             }
         }
+        }
         if includeChecker {
             drawPageGuides(encoder: encoder, viewport: vp, zoom: zoom,
                            rotation: rotation, pan: pan)
@@ -866,6 +923,119 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                                  rotation: rotation, pan: pan)
         }
         encoder.endEncoding()
+    }
+
+    /// Isolate folder contents before applying folder opacity/blend. Scratch textures
+    /// are retained by nesting depth; paint remains in its original sparse GPU tiles.
+    private func composeGroup(parentID: UUID?, depth: Int, commandBuffer: MTLCommandBuffer,
+                              viewport: CGSize, zoom: Float, rotation: Float,
+                              pan: SIMD2<Float>) -> MTLTexture? {
+        let width = max(1, Int(viewport.width)), height = max(1, Int(viewport.height))
+        let target: MTLTexture
+        if let cached = groupTargets[depth], cached.width == width, cached.height == height {
+            target = cached
+        } else {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                width: width, height: height, mipmapped: false)
+            descriptor.storageMode = .private
+            descriptor.usage = [.renderTarget, .shaderRead]
+            guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+            groupTargets[depth] = texture
+            target = texture
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        let vp = SIMD2<Float>(Float(width), Float(height))
+        var encoder: MTLRenderCommandEncoder?
+        var currentBackdrop: MTLTexture?
+        func startEncoder() -> MTLRenderCommandEncoder? {
+            let result = commandBuffer.makeRenderCommandEncoder(descriptor: pass)
+            result?.setRenderPipelineState(layerCompositePipeline)
+            if let currentBackdrop { result?.setFragmentTexture(currentBackdrop, index: 1) }
+            // Later segments must retain layers rendered before an isolated child.
+            pass.colorAttachments[0].loadAction = .load
+            return result
+        }
+        func prepareBackdrop() -> Bool {
+            guard !usesRasterOrderGroups else { return true }
+            encoder?.endEncoding()
+            if let cached = groupBackdrops[depth], cached.width == width, cached.height == height {
+                currentBackdrop = cached
+            } else {
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                    width: width, height: height, mipmapped: false)
+                descriptor.storageMode = .private
+                descriptor.usage = .shaderRead
+                guard let texture = device.makeTexture(descriptor: descriptor) else { return false }
+                groupBackdrops[depth] = texture
+                currentBackdrop = texture
+            }
+            guard let currentBackdrop, let copy = commandBuffer.makeBlitCommandEncoder() else { return false }
+            copy.copy(from: target, to: currentBackdrop)
+            copy.endEncoding()
+            encoder = startEncoder()
+            return encoder != nil
+        }
+        encoder = startEncoder()
+        guard encoder != nil else { return nil }
+        for layer in page.layers where layer.parentID == parentID && layer.isVisible && layer.opacity > 0 {
+            guard prepareBackdrop() else { return nil }
+            var uniforms = LayerCompositeUniforms(opacity: Float(layer.opacity), mode: layer.blendMode.shaderIndex)
+            if let tone = layer.tone, tone.isEnabled {
+                let dpi = Float(page.comicLayout?.dpi ?? 350)
+                uniforms.tone = SIMD4<Float>(dpi / Float(max(1, tone.frequency)),
+                    Float(tone.angle * .pi / 180), Float(tone.density), 1)
+                uniforms.canvasMap = SIMD4<Float>(cos(rotation) / max(zoom, 0.000001),
+                    sin(rotation) / max(zoom, 0.000001), pan.x, pan.y)
+            }
+            if layer.kind == .folder {
+                encoder?.endEncoding()
+                guard let child = composeGroup(parentID: layer.id, depth: depth + 1,
+                    commandBuffer: commandBuffer, viewport: viewport, zoom: zoom,
+                    rotation: rotation, pan: pan) else { return nil }
+                encoder = startEncoder()
+                guard let encoder else { return nil }
+                var screen = QuadUniforms(origin: .zero, size: vp, viewport: vp,
+                                          zoom: 1, rotation: 0, pan: .zero)
+                encoder.setVertexBytes(&screen, length: MemoryLayout<QuadUniforms>.stride, index: 0)
+                encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerCompositeUniforms>.stride, index: 0)
+                encoder.setFragmentTexture(child, index: 0)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            } else if layer.kind == .solidWhite {
+                guard let encoder else { return nil }
+                let rect = layer.paperBounds ?? CGRect(x: 0, y: 0, width: page.width, height: page.height)
+                var quad = QuadUniforms(origin: SIMD2<Float>(Float(rect.minX), Float(rect.minY)),
+                    size: SIMD2<Float>(Float(rect.width), Float(rect.height)), viewport: vp,
+                    zoom: zoom, rotation: rotation, pan: pan)
+                uniforms.solid = 1
+                encoder.setVertexBytes(&quad, length: MemoryLayout<QuadUniforms>.stride, index: 0)
+                encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerCompositeUniforms>.stride, index: 0)
+                // A valid texture is required even though the solid branch does not sample it.
+                encoder.setFragmentTexture(emptyMask, index: 0)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            } else {
+                guard let encoder else { return nil }
+                encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerCompositeUniforms>.stride, index: 0)
+                let keys = Set(tiles.keys.filter { $0.layerID == layer.id })
+                    .union(previewTiles.keys.filter { $0.layerID == layer.id })
+                let tileSize = CanvasConstants.tileSize
+                for key in keys {
+                    guard let texture = previewTiles[key] ?? tiles[key] else { continue }
+                    var quad = QuadUniforms(origin: SIMD2<Float>(Float(key.x * tileSize), Float(key.y * tileSize)),
+                        size: SIMD2<Float>(Float(min(tileSize, page.width - key.x * tileSize)),
+                                           Float(min(tileSize, page.height - key.y * tileSize))), viewport: vp,
+                        zoom: zoom, rotation: rotation, pan: pan)
+                    encoder.setVertexBytes(&quad, length: MemoryLayout<QuadUniforms>.stride, index: 0)
+                    encoder.setFragmentTexture(texture, index: 0)
+                    encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+                }
+            }
+        }
+        encoder?.endEncoding()
+        return target
     }
 
     private func drawPageGuides(encoder: MTLRenderCommandEncoder,

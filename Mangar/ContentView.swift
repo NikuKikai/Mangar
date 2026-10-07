@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-private struct MangarLogoMark: View {
+struct MangarLogoMark: View {
     var body: some View {
         Canvas { context, size in
             let scale = min(size.width, size.height) / 100
@@ -254,7 +254,9 @@ private struct EditorWorkspace: View {
     }
     @ObservedObject var session: EditorSession
     let showProjects: () -> Void
+    @State private var showToneParameters = false
     @State private var showBrushSettings = false
+    @State private var brushSettingsAnchor: CGRect = .zero
     @State private var showColorEditor = false
     @State private var collapsedFolders: Set<UUID> = []
     @State private var layerRowFrames: [UUID: CGRect] = [:]
@@ -266,14 +268,15 @@ private struct EditorWorkspace: View {
     @State private var workspaceView: WorkspaceView = .canvas
 
     var body: some View {
-        HStack(spacing: 0) {
-            toolRail
-                .disabled(workspaceView == .pages)
-                .frame(width: 40)
-                .background(Color(red: 0.15, green: 0.16, blue: 0.17))
-            Rectangle().fill(Color.black.opacity(0.45)).frame(width: 1)
-            VStack(spacing: 0) {
-                toolbar
+        VStack(spacing: 0) {
+            toolbar
+            Rectangle().fill(Color.black.opacity(0.45)).frame(height: 1)
+            HStack(spacing: 0) {
+                toolRail
+                    .disabled(workspaceView == .pages)
+                    .frame(width: 40)
+                    .background(Color(red: 0.15, green: 0.16, blue: 0.17))
+                Rectangle().fill(Color.black.opacity(0.45)).frame(width: 1)
                 ZStack {
                     CanvasSurfaceRepresentable(session: session)
                         .allowsHitTesting(workspaceView == .canvas)
@@ -284,24 +287,42 @@ private struct EditorWorkspace: View {
                         }
                     }
                 }
+                Rectangle().fill(Color.black.opacity(0.45)).frame(width: 1)
+                sidebar
+                    .disabled(workspaceView == .pages)
+                    .frame(width: 192)
+                    .background(Color(red: 0.15, green: 0.16, blue: 0.17))
             }
-            Rectangle().fill(Color.black.opacity(0.45)).frame(width: 1)
-            sidebar
-                .disabled(workspaceView == .pages)
-                .frame(width: 192)
-                .background(Color(red: 0.15, green: 0.16, blue: 0.17))
         }
         .ignoresSafeArea(edges: .bottom)
+        .coordinateSpace(name: "editorWorkspace")
+        .onPreferenceChange(BrushSettingsAnchorKey.self) { frame in
+            if !frame.isEmpty { brushSettingsAnchor = frame }
+        }
         .overlay {
             FloatingPanelOverlay(brush: $session.brush,
                                  showsColor: showColorEditor && workspaceView == .canvas,
                                  showsBrush: showBrushSettings && workspaceView == .canvas,
+                                 brushAnchor: brushSettingsAnchor,
                                  closeColor: { showColorEditor = false },
                                  closeBrush: { showBrushSettings = false })
         }
-        .overlay(alignment: .topLeading) {
+        .overlay {
             if showAppMenu {
-                appMenu.offset(x: 70, y: 34)
+                ZStack(alignment: .topLeading) {
+                    // Menus dismiss on an outside click; persistent panels keep
+                    // their separate pass-through interaction above the canvas.
+                    Button { showAppMenu = false } label: {
+                        Color.clear.contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityLabel("关闭应用菜单")
+                    appMenu
+                        .contentShape(Rectangle())
+                        .onTapGesture { }
+                        .offset(x: 33, y: 35)
+                }
             }
         }
         .overlay {
@@ -333,6 +354,7 @@ private struct EditorWorkspace: View {
             session.saveNow()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            showAppMenu = false
             session.releaseModifiers()
         }
     }
@@ -409,6 +431,13 @@ private struct EditorWorkspace: View {
                 }
             }
             .overlay(Rectangle().stroke(.white.opacity(0.16), lineWidth: 1))
+            if workspaceView == .canvas {
+                Button { session.renderer.straightenViewport() } label: {
+                    Image(systemName: "rotate.left").frame(width: 22, height: 24)
+                }
+                .help("画布回正（保持缩放与视口中心）")
+                .accessibilityLabel("画布回正，保持缩放与视口中心")
+            }
             Spacer(minLength: 8)
             if workspaceView == .pages {
                 Text("\(session.manifest.logicalPageCount) 页")
@@ -452,6 +481,10 @@ private struct EditorWorkspace: View {
                 } label: {
                     Image(systemName: "slider.horizontal.3").frame(width: 22, height: 24)
                 }
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: BrushSettingsAnchorKey.self,
+                        value: geometry.frame(in: .named("editorWorkspace")))
+                })
             }
         }
         .font(.system(size: 13))
@@ -544,6 +577,7 @@ private struct EditorWorkspace: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             layerControls
+            if showToneParameters { toneParameters }
             layerList
         }
         .buttonStyle(.plain)
@@ -576,6 +610,13 @@ private struct EditorWorkspace: View {
                 .disabled(session.selectedLayerID == nil)
                 .help(session.selectedLockActionWillLock ? "锁定所选图层" : "解锁所选图层")
                 .accessibilityLabel(session.selectedLockActionWillLock ? "锁定所选图层" : "解锁所选图层")
+                SlideOutButton(icon: "circle.grid.3x3.fill", label: "网点效果",
+                    isOn: !session.selectedLayerIDs.isEmpty && !session.selectedToneWillEnable,
+                    isExpanded: showToneParameters,
+                    action: { session.toggleSelectedTone() },
+                    expand: { showToneParameters = true })
+                    .frame(width: 23, height: 23)
+                    .disabled(session.selectedLayerID == nil)
                 Spacer(minLength: 0)
                 Button(role: .destructive) { session.deleteSelectedLayer() } label: {
                     Image(systemName: "trash").frame(width: 23, height: 23)
@@ -588,6 +629,54 @@ private struct EditorWorkspace: View {
             .buttonStyle(.plain)
             .frame(height: 24)
         }
+    }
+
+    private var toneParameters: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text("网点参数").font(.system(size: 10, weight: .semibold))
+                Spacer(minLength: 0)
+                Button { showToneParameters = false } label: {
+                    Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
+                        .frame(width: 18, height: 18)
+                }
+                .accessibilityLabel("关闭网点参数区")
+            }
+            if let layer = session.selectedLayer {
+                let tone = layer.tone ?? LayerToneEffect(isEnabled: false)
+                toneParameter("线数", text: "\(Int(tone.frequency.rounded()))",
+                    value: .number(tone.frequency, 10...120, pointsPerUnit: 1), unit: "线/英寸", layer: layer) {
+                        session.previewLayerTone(frequency: $0)
+                    }
+                toneParameter("角度", text: "\(Int(tone.angle.rounded()))",
+                    value: .number(tone.angle, 0...180, pointsPerUnit: 1), unit: "°", layer: layer) {
+                        session.previewLayerTone(angle: $0)
+                    }
+                toneParameter("浓度", text: "\(Int((tone.density * 100).rounded()))%",
+                    value: .number(tone.density, 0...1, pointsPerUnit: 200), unit: "", layer: layer) {
+                        session.previewLayerTone(density: $0)
+                    }
+            } else {
+                Text("未选择图层").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+        }
+        .padding(4)
+        .background(Color(red: 0.18, green: 0.19, blue: 0.20))
+        .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.12)).frame(height: 1) }
+    }
+
+    private func toneParameter(_ title: String, text: String, value: VerticalDragProperty.Value,
+                               unit: String, layer: LayerRecord, change: @escaping (Double) -> Void) -> some View {
+        HStack(spacing: 4) {
+            Text(title).font(.system(size: 10)).foregroundStyle(.secondary).frame(width: 28, alignment: .leading)
+            VerticalDragProperty(text: text, label: "网点" + title, value: value,
+                begin: { session.beginLayerPropertyEdit(layer.id) }, change: change,
+                end: { session.endLayerPropertyEdit(commit: $0) })
+                .frame(width: 40, height: 16)
+            Text(unit).font(.system(size: 9)).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        .frame(height: 18)
     }
 
     private var visibleLayerEntries: [LayerDisplayEntry] {
@@ -605,7 +694,7 @@ private struct EditorWorkspace: View {
                     }
                     Rectangle()
                         .fill(.clear)
-                        .frame(height: max(48, geometry.size.height - CGFloat(visibleLayerEntries.count * 31) - 2))
+                        .frame(height: max(48, geometry.size.height - CGFloat(visibleLayerEntries.count * 35) - 2))
                         .contentShape(Rectangle())
                         .overlay(alignment: .top) {
                             if let target = layerDropTarget, target.lineRowID == nil {
@@ -633,53 +722,73 @@ private struct EditorWorkspace: View {
                 Image(systemName: layer.isVisible ? "eye" : "eye.slash")
                     .foregroundStyle(session.page.isEffectivelyVisible(layer.id)
                                      ? Color.primary : Color.gray.opacity(0.55))
-                    .frame(width: 25, height: 31)
+                    .frame(width: 25, height: 35)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(layer.isVisible ? "隐藏图层" : "显示图层")
-            HStack(spacing: 4) {
-                if layer.kind == .folder {
-                    Button {
-                        if !collapsedFolders.insert(layer.id).inserted {
-                            collapsedFolders.remove(layer.id)
-                        }
-                    } label: {
-                        Image(systemName: collapsedFolders.contains(layer.id) ? "chevron.right" : "chevron.down")
-                            .frame(width: 10, height: 31)
-                            .foregroundStyle(layerDropTarget?.parentID == layer.id ? Color.accentColor : Color.primary)
-                            .background(layerDropTarget?.parentID == layer.id
-                                        ? Color.accentColor.opacity(0.22) : .clear)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(collapsedFolders.contains(layer.id) ? "展开文件夹" : "折叠文件夹")
-                }
-                HStack(spacing: 4) {
-                    if layer.kind == .folder {
-                        Image(systemName: "folder.fill")
-                            .foregroundStyle(.gray)
+            HStack(spacing: 2) {
+                HStack(spacing: 2) {
+                    Group {
+                        if layer.kind == .folder {
+                            HStack(spacing: 1) {
+                                Button {
+                                    if !collapsedFolders.insert(layer.id).inserted {
+                                        collapsedFolders.remove(layer.id)
+                                    }
+                                } label: {
+                                    Image(systemName: collapsedFolders.contains(layer.id) ? "chevron.right" : "chevron.down")
+                                        .font(.system(size: 8))
+                                        .frame(width: 8, height: 28)
+                                        .foregroundStyle(layerDropTarget?.parentID == layer.id ? Color.accentColor : Color.primary)
+                                        .background(layerDropTarget?.parentID == layer.id
+                                                    ? Color.accentColor.opacity(0.22) : .clear)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(collapsedFolders.contains(layer.id) ? "展开文件夹" : "折叠文件夹")
+                                Image(systemName: "folder.fill")
+                                    .foregroundStyle(.gray)
+                                    .frame(width: 15, alignment: .leading)
+                                    .overlay { layerSelectionCapture(layer.id) }
+                            }
                             .frame(width: 24)
-                    } else {
-                        layerThumbnail(layer)
+                        } else {
+                            layerThumbnail(layer)
+                                .overlay { layerSelectionCapture(layer.id) }
+                        }
                     }
-                    Text(layer.name)
-                        .fontWeight(layer.id == session.selectedLayerID ? .semibold : .regular)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
+                    .frame(height: 28)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(layer.name)
+                            .fontWeight(layer.id == session.selectedLayerID ? .semibold : .regular)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, minHeight: 13, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .overlay { layerSelectionCapture(layer.id) }
+                        HStack(spacing: 2) {
+                            VerticalDragProperty(text: String(layer.blendMode.title.prefix(2)), label: "混合模式",
+                                value: .choice(Int(layer.blendMode.shaderIndex), LayerBlendMode.allCases.map(\.title)),
+                                begin: { session.beginLayerPropertyEdit(layer.id) },
+                                change: { index in
+                                    session.previewLayerBlendMode(LayerBlendMode.allCases[Int(index)])
+                                }, end: { session.endLayerPropertyEdit(commit: $0) })
+                            .frame(width: 22)
+                            VerticalDragProperty(text: "\(Int((layer.opacity * 100).rounded()))%", label: "图层不透明度",
+                                value: .number(layer.opacity, 0...1, pointsPerUnit: 200),
+                                begin: { session.beginLayerPropertyEdit(layer.id) },
+                                change: { session.previewLayerOpacity($0) },
+                                end: { session.endLayerPropertyEdit(commit: $0) })
+                            .frame(width: 28)
+                        }
+                        .frame(height: 14)
+                    }
+                    .frame(maxWidth: .infinity)
                 }
                 .frame(maxWidth: .infinity)
-                .contentShape(Rectangle())
-                .overlay {
-                    LayerRowTapCapture { modifiers in
-                        session.selectLayer(layer.id,
-                                            shift: session.activeModifiers.contains(.shift) || modifiers.contains(.shift),
-                                            command: session.activeModifiers.contains(.command) || modifiers.contains(.command))
-                    }
-                }
                 if layer.isLocked {
                     Button { session.toggleLock(layer.id) } label: {
                         Image(systemName: "lock.fill")
                             .foregroundStyle(.secondary)
-                            .frame(width: 19, height: 31)
+                            .frame(width: 19, height: 35)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("解锁图层")
@@ -688,17 +797,17 @@ private struct EditorWorkspace: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .opacity(session.page.isEffectivelyLocked(layer.id) ? 0.35 : 1)
-                    .frame(width: 19, height: 31)
+                    .frame(width: 19, height: 35)
                     .contentShape(Rectangle())
                     .highPriorityGesture(layerHandleDrag(layer.id))
                     .accessibilityLabel("拖动图层")
             }
-            .padding(.leading, CGFloat(2 + entry.depth * 10))
-            .padding(.trailing, 2)
+            .padding(.leading, CGFloat(1 + entry.depth * 10))
+            .padding(.trailing, 1)
             .frame(maxWidth: .infinity)
         }
         .font(.system(size: 11))
-        .frame(height: 31)
+        .frame(height: 35)
         .frame(maxWidth: .infinity)
         .background(layer.id == session.selectedLayerID ? Color.accentColor.opacity(0.33) :
                     session.selectedLayerIDs.contains(layer.id) ? Color.gray.opacity(0.30) : .clear)
@@ -730,6 +839,14 @@ private struct EditorWorkspace: View {
                 Color.clear.preference(key: LayerRowFrameKey.self,
                                        value: [layer.id: proxy.frame(in: .named("layerList"))])
             }
+        }
+    }
+
+    private func layerSelectionCapture(_ id: UUID) -> some View {
+        LayerRowTapCapture { modifiers in
+            session.selectLayer(id,
+                shift: session.activeModifiers.contains(.shift) || modifiers.contains(.shift),
+                command: session.activeModifiers.contains(.command) || modifiers.contains(.command))
         }
     }
 
@@ -797,7 +914,7 @@ private struct EditorWorkspace: View {
             context.stroke(lines, with: .color(.white.opacity(0.25)), lineWidth: 1)
             context.stroke(highlightedLines, with: .color(.accentColor), lineWidth: 1.5)
         }
-        .frame(width: CGFloat(37 + entry.depth * 10), height: 31)
+        .frame(width: CGFloat(37 + entry.depth * 10), height: 35)
     }
 
     private func layerThumbnail(_ layer: LayerRecord) -> some View {
@@ -814,6 +931,18 @@ private struct EditorWorkspace: View {
         }
         .frame(width: 24, height: 24)
         .overlay(Rectangle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+        .overlay(alignment: .bottomTrailing) {
+            if layer.kind == .solidWhite {
+                Image(systemName: "doc.fill")
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundStyle(.white)
+                    .frame(width: 12, height: 12)
+                    .background(Color(red: 0.17, green: 0.18, blue: 0.19))
+                    .help("白色背景（特殊图层）")
+                    .allowsHitTesting(false)
+            }
+        }
+        .accessibilityLabel(layer.kind == .solidWhite ? "白色背景图层缩略图" : "绘画图层缩略图")
     }
 
     private func layerHandleDrag(_ sourceID: UUID) -> some Gesture {
@@ -1010,15 +1139,30 @@ private struct ThumbnailChecker: View {
 
 /// Only the visible panel frames participate in hit testing. The rest of this
 /// full-size overlay returns nil so Pencil and finger touches reach the canvas.
+private struct BrushSettingsAnchorKey: PreferenceKey {
+    static var defaultValue: CGRect { .zero }
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if !next.isEmpty { value = next }
+    }
+}
+
 private final class FloatingPanelContainer: UIView {
     var colorHost: UIHostingController<AnyView>?
     var brushHost: UIHostingController<AnyView>?
+    var brushAnchor: CGRect = .zero
 
     override func layoutSubviews() {
         super.layoutSubviews()
         if let brushHost {
             let size = brushHost.sizeThatFits(in: bounds.size)
-            brushHost.view.frame = CGRect(origin: CGPoint(x: 146, y: 44), size: size)
+            let anchor = brushAnchor.isEmpty
+                ? CGRect(x: bounds.width - 198, y: 0, width: 0, height: 34) : brushAnchor
+            let x = min(max(6, anchor.maxX - size.width), max(6, bounds.width - size.width - 6))
+            let below = anchor.maxY + 6
+            let y = below + size.height <= bounds.height - 6 ? below :
+                max(6, anchor.minY - size.height - 6)
+            brushHost.view.frame = CGRect(origin: CGPoint(x: x, y: y), size: size)
         }
         if let colorHost {
             let size = colorHost.sizeThatFits(in: bounds.size)
@@ -1047,6 +1191,7 @@ private struct FloatingPanelOverlay: UIViewRepresentable {
     @Binding var brush: RoundBrush
     let showsColor: Bool
     let showsBrush: Bool
+    let brushAnchor: CGRect
     let closeColor: () -> Void
     let closeBrush: () -> Void
 
@@ -1057,6 +1202,7 @@ private struct FloatingPanelOverlay: UIViewRepresentable {
     }
 
     func updateUIView(_ view: FloatingPanelContainer, context: Context) {
+        view.brushAnchor = brushAnchor
         if showsColor {
             let panel = AnyView(ColorEditorPanel(brush: $brush, close: closeColor))
             if let host = view.colorHost {

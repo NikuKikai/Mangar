@@ -39,6 +39,33 @@ struct ComicPageLayout: Codable, Equatable {
     }
 }
 
+enum LayerBlendMode: String, Codable, CaseIterable {
+    case normal, multiply, screen, overlay, darken, lighten, softLight, hardLight, difference, add
+
+    var title: String {
+        switch self {
+        case .normal: "正常"
+        case .multiply: "乘算"
+        case .screen: "滤色"
+        case .overlay: "叠加"
+        case .darken: "变暗"
+        case .lighten: "变亮"
+        case .softLight: "柔光"
+        case .hardLight: "强光"
+        case .difference: "差值"
+        case .add: "添加（发光）"
+        }
+    }
+    var shaderIndex: UInt32 { UInt32(Self.allCases.firstIndex(of: self)!) }
+}
+
+struct LayerToneEffect: Codable, Equatable {
+    var isEnabled: Bool = true
+    var frequency: Double = 60
+    var angle: Double = 45
+    var density: Double = 0.5
+}
+
 struct LayerRecord: Codable, Identifiable, Equatable {
     enum Kind: String, Codable { case paint, folder, solidWhite }
 
@@ -48,6 +75,8 @@ struct LayerRecord: Codable, Identifiable, Equatable {
     var parentID: UUID? = nil
     var isVisible: Bool = true
     var opacity: Double = 1
+    var blendMode: LayerBlendMode = .normal
+    var tone: LayerToneEffect? = nil
     var isLocked: Bool = false
     /// Bounds of a procedural background after page merge/split.
     var paperBounds: CGRect? = nil
@@ -55,7 +84,7 @@ struct LayerRecord: Codable, Identifiable, Equatable {
 
 extension LayerRecord {
     private enum CodingKeys: String, CodingKey {
-        case id, name, kind, parentID, isVisible, opacity, isLocked, paperBounds
+        case id, name, kind, parentID, isVisible, opacity, blendMode, tone, isLocked, paperBounds
     }
 
     init(from decoder: Decoder) throws {
@@ -66,6 +95,8 @@ extension LayerRecord {
         parentID = try values.decodeIfPresent(UUID.self, forKey: .parentID)
         isVisible = try values.decode(Bool.self, forKey: .isVisible)
         opacity = try values.decode(Double.self, forKey: .opacity)
+        blendMode = try values.decodeIfPresent(LayerBlendMode.self, forKey: .blendMode) ?? .normal
+        tone = try values.decodeIfPresent(LayerToneEffect.self, forKey: .tone)
         isLocked = try values.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
         paperBounds = try values.decodeIfPresent(CGRect.self, forKey: .paperBounds)
     }

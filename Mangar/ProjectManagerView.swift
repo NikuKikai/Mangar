@@ -53,29 +53,38 @@ struct ProjectManagerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Mangar")
-                    .font(.system(size: 25, weight: .semibold))
-                Spacer()
-                if creating {
-                    Button("返回项目") { creating = false }
-                } else {
-                    Button("导入项目…") { showingImporter = true }
+            HStack(spacing: 4) {
+                Button { close?() } label: {
+                    MangarLogoMark()
+                        .frame(width: 22, height: 22)
+                        .frame(width: 25, height: 24)
                 }
-                if let close {
-                    Button(action: close) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(width: 30, height: 30)
+                .disabled(close == nil)
+                .help(close == nil ? "Mangar" : "返回编辑界面")
+                .accessibilityLabel(close == nil ? "Mangar，尚未打开项目" : "返回编辑界面")
+                Rectangle().fill(.white.opacity(0.18))
+                    .frame(width: 1, height: 18).padding(.horizontal, 3)
+                Text(creating ? "新建项目" : "项目管理")
+                Spacer(minLength: 8)
+                if creating {
+                    Button { creating = false } label: {
+                        Label("返回项目", systemImage: "arrow.left")
+                            .padding(.horizontal, 4).frame(height: 24)
                     }
-                    .buttonStyle(.plain)
-                    .help("关闭项目管理，返回画布")
-                    .accessibilityLabel("关闭项目管理")
+                } else {
+                    Button { showingImporter = true } label: {
+                        Label("导入项目…", systemImage: "square.and.arrow.down")
+                            .padding(.horizontal, 4).frame(height: 24)
+                    }
                 }
             }
-            .padding(.horizontal, 28)
-            .frame(height: 64)
-            .background(Color(red: 0.16, green: 0.17, blue: 0.18))
+            .font(.system(size: 13))
+            .buttonStyle(.plain)
+            .controlSize(.mini)
+            .padding(.horizontal, 4)
+            .frame(height: 34)
+            .background(Color(red: 0.18, green: 0.19, blue: 0.20))
+            Rectangle().fill(Color.black.opacity(0.45)).frame(height: 1)
             if creating {
                 creationForm
             } else {

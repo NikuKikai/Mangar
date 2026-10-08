@@ -12,6 +12,9 @@ struct SlideOutButton: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SlideOutButtonView { SlideOutButtonView() }
     func updateUIView(_ view: SlideOutButtonView, context: Context) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
         view.configure(icon: icon, label: label, isOn: isOn, isExpanded: isExpanded,
                        enabled: context.environment.isEnabled, action: action, expand: expand)
     }
@@ -57,7 +60,7 @@ final class SlideOutButtonView: UIControl {
     }
     override func layoutSubviews() {
         super.layoutSubviews()
-        image.frame = CGRect(x: (bounds.width - 14) / 2, y: (bounds.height - 17) / 2,
+        image.frame = CGRect(x: (bounds.width - 14) / 2, y: (bounds.height - 14) / 2,
                              width: 14, height: 14)
         indicator.frame = CGRect(x: (bounds.width - 7) / 2, y: bounds.height - 3,
                                  width: 7, height: 1)

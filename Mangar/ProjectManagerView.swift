@@ -79,7 +79,7 @@ struct ProjectManagerView: View {
                 }
             }
             .font(.system(size: 13))
-            .buttonStyle(.plain)
+            .buttonStyle(ImmediateButtonStyle())
             .controlSize(.mini)
             .padding(.horizontal, 4)
             .frame(height: 34)
@@ -133,7 +133,7 @@ struct ProjectManagerView: View {
                             .padding(.horizontal, 12).frame(height: 30)
                             .background(Color(red: 0.65, green: 0.16, blue: 0.16))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(ImmediateButtonStyle())
                     }
                     .padding(16)
                     .frame(width: 360)
@@ -165,7 +165,7 @@ struct ProjectManagerView: View {
                     .background(Color.white.opacity(0.055))
                     .overlay(Rectangle().strokeBorder(.white.opacity(0.2), style: StrokeStyle(lineWidth: 1, dash: [5])))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ImmediateButtonStyle())
                 if let current = currentProject {
                     projectCard(current, current: true)
                 }
@@ -238,7 +238,7 @@ struct ProjectManagerView: View {
                         .padding(.horizontal, 8)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ImmediateButtonStyle())
                 .background(Color(red: 0.16, green: 0.17, blue: 0.18))
                 .overlay(Rectangle().stroke(.white.opacity(0.25), lineWidth: 1))
                 .shadow(color: .black.opacity(0.45), radius: 8, y: 4)
@@ -267,7 +267,7 @@ struct ProjectManagerView: View {
                         .overlay(Rectangle().stroke(.white.opacity(0.18), lineWidth: 1))
                     }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ImmediateButtonStyle())
                 .overlay(alignment: .topLeading) {
                     if showingPresets {
                         VStack(spacing: 0) {
@@ -286,7 +286,7 @@ struct ProjectManagerView: View {
                                             ? Color.white.opacity(0.08) : .clear)
                             }
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(ImmediateButtonStyle())
                         .background(Color(red: 0.16, green: 0.17, blue: 0.18))
                         .overlay(Rectangle().stroke(.white.opacity(0.25), lineWidth: 1))
                         .shadow(color: .black.opacity(0.45), radius: 8, y: 4)
@@ -313,7 +313,7 @@ struct ProjectManagerView: View {
                                 .background(startingSide == side ? Color.white.opacity(0.14) : .clear)
                                 .overlay(Rectangle().stroke(.white.opacity(0.18), lineWidth: 1))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(ImmediateButtonStyle())
                     }
                 }
                 HStack(spacing: 14) {
@@ -337,7 +337,7 @@ struct ProjectManagerView: View {
                     .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
                               draftLayout == nil ||
                               Int(pageCount).map { !(1...100).contains($0) } ?? true)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(ImmediateBorderedButtonStyle(prominent: true))
                 }
                 .padding(.top, 4)
             }
@@ -345,7 +345,7 @@ struct ProjectManagerView: View {
             .padding(30)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .buttonStyle(.bordered)
+        .buttonStyle(ImmediateBorderedButtonStyle())
     }
 
     private func field(_ title: String, value: Binding<String>, numeric: Bool = false,
@@ -407,6 +407,9 @@ struct ProjectCardInteraction: UIViewRepresentable {
     }
 
     func updateUIView(_ view: ProjectCardHitView, context: Context) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
         context.coordinator.open = open
         context.coordinator.menu = menu
         view.onOpen = open

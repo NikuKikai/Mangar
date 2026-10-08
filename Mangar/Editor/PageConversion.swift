@@ -74,7 +74,8 @@ enum PageConversion {
         }
         let size = CanvasConstants.tileSize
         for (key, data) in source.tiles {
-            guard let layerID = ids[key.layerID] else { continue }
+            guard let layerID = ids[key.layerID], data.count == key.rawSize else { continue }
+            let channels = key.target.bytesPerPixel
             let intersection = CGRect(x: key.x * size, y: key.y * size, width: size, height: size)
                 .intersection(clip)
             guard !intersection.isNull, !intersection.isEmpty else { continue }
@@ -83,13 +84,13 @@ enum PageConversion {
                     var x = Int(intersection.minX)
                     while x < Int(intersection.maxX) {
                         let dx = x + offset
-                        let destination = TileKey(layerID: layerID, x: dx / size, y: y / size)
+                        let destination = TileKey(layerID: layerID, x: dx / size, y: y / size, target: key.target)
                         let count = min(Int(intersection.maxX) - x, size - dx % size)
-                        var tile = output.tiles.removeValue(forKey: destination) ?? Data(count: size * size * 4)
+                        var tile = output.tiles.removeValue(forKey: destination) ?? Data(repeating: key.target.defaultByte, count: size * size * channels)
                         tile.withUnsafeMutableBytes { bytes in
-                            bytes.baseAddress!.advanced(by: ((y % size) * size + dx % size) * 4)
+                            bytes.baseAddress!.advanced(by: ((y % size) * size + dx % size) * channels)
                                 .copyMemory(from: sourceBytes.baseAddress!.advanced(by:
-                                    ((y - key.y * size) * size + x - key.x * size) * 4), byteCount: count * 4)
+                                    ((y - key.y * size) * size + x - key.x * size) * channels), byteCount: count * channels)
                         }
                         output.tiles[destination] = tile
                         x += count

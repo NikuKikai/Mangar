@@ -13,7 +13,12 @@ struct CanvasSurfaceRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: CanvasSurface, context: Context) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
         uiView.session = session
+        session.renderer.viewportTintLayerID = session.showsTargetTint ? session.selectedLayerID : nil
+        session.renderer.viewportTintTarget = session.selectedEditTarget
         uiView.refreshBrushCursor()
         uiView.setNeedsDisplay()
     }
@@ -22,7 +27,10 @@ struct CanvasSurfaceRepresentable: UIViewRepresentable {
 final class CanvasSurface: MTKView {
     weak var session: EditorSession? {
         didSet {
-            if oldValue !== session { hideBrushCursor() }
+            if oldValue !== session {
+                historyTap = nil
+                hideBrushCursor()
+            }
         }
     }
     private let cursorOutline = CAShapeLayer()
@@ -37,6 +45,22 @@ final class CanvasSurface: MTKView {
     private var panStartPoint: CGPoint = .zero
     private var panStartOffset: CGPoint = .zero
     private var transformStart: TwoFingerTransform?
+
+    private var historyTap: HistoryTap?
+
+    private struct HistoryTap {
+        var started: TimeInterval
+        var origins: [UITouch: CGPoint] = [:]
+        var active: Set<UITouch> = []
+        var peakTouches = 0
+        var valid = true
+        var zoom: CGFloat
+        var rotation: CGFloat
+        var pan: CGPoint
+    }
+
+    // The canvas owns three-finger history gestures instead of the system edit menu.
+    override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
 
     private struct TwoFingerTransform {
         var distance: CGFloat
@@ -89,6 +113,7 @@ final class CanvasSurface: MTKView {
     }
 
     @objc private func hideBrushCursor() {
+        if UIApplication.shared.applicationState != .active { historyTap = nil }
         hoverPoint = nil
         contactPoint = nil
         refreshBrushCursor()
@@ -99,12 +124,12 @@ final class CanvasSurface: MTKView {
         let position = contactPoint ?? hoverPoint
         let radius: CGFloat
         if let session, let position,
-           session.selectedTool != .selection,
+           !session.selectedTool.isRegionTool,
            !session.activeModifiers.contains(.option), pickingTouch == nil,
            bounds.contains(position),
            session.renderer.isInsideCanvas(session.renderer.canvasPoint(from: position)) {
             let tipRadius = contactPoint != nil ?
-                (session.renderer.previewTipRadius ?? max(0.5, CGFloat(session.brush.size) * max(0.05, contactPressure) / 2)) :
+                (session.renderer.previewTipRadius ?? max(0.5, CGFloat(session.brush.size) * max(0.05, CGFloat(session.mappedPressure(contactPressure))) / 2)) :
                 max(0.5, CGFloat(session.brush.size) / 2)
             radius = tipRadius * session.renderer.zoom
         } else {
@@ -138,6 +163,7 @@ final class CanvasSurface: MTKView {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesBegan(touches, with: event)
+        trackHistoryTapBegan(touches)
         guard let session else { return }
         let optionDown = session.activeModifiers.contains(.option)
             || event?.modifierFlags.contains(.alternate) == true
@@ -159,7 +185,7 @@ final class CanvasSurface: MTKView {
             return
         }
         if selectionTouch == nil, pickingTouch == nil,
-           session.selectedTool == .selection,
+           session.selectedTool.isRegionTool,
            let pencil = touches.first(where: { $0.type == .pencil }) {
             selectionTouch = pencil
             hideBrushCursor()
@@ -167,7 +193,7 @@ final class CanvasSurface: MTKView {
                                    shift: shiftDown, option: optionDown)
             return
         }
-        if session.selectedTool != .selection, pickingTouch == nil, optionDown,
+        if !session.selectedTool.isRegionTool, pickingTouch == nil, optionDown,
            let pencil = touches.first(where: { $0.type == .pencil }) {
             pickingTouch = pencil
             hideBrushCursor()
@@ -193,7 +219,7 @@ final class CanvasSurface: MTKView {
             return
         }
         guard pencilTouch == nil else { return }
-        if session.selectedTool == .selection, fingerTouches.isEmpty,
+        if session.selectedTool.isSelectionTool, fingerTouches.isEmpty,
            let finger = touches.first(where: { $0.type == .direct }) {
             selectionTouch = finger
             session.beginSelection(at: session.renderer.canvasPoint(from: finger.preciseLocation(in: self)),
@@ -215,10 +241,13 @@ final class CanvasSurface: MTKView {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesMoved(touches, with: event)
+        trackHistoryTapMovement(touches)
         guard let session else { return }
         if let selectionTouch, touches.contains(selectionTouch) {
-            session.updateSelection(to: session.renderer.canvasPoint(
-                from: selectionTouch.preciseLocation(in: self)))
+            let samples = event?.coalescedTouches(for: selectionTouch) ?? [selectionTouch]
+            session.updateSelection(along: samples.map {
+                session.renderer.canvasPoint(from: $0.preciseLocation(in: self))
+            })
             return
         }
         if let pickingTouch {
@@ -241,6 +270,12 @@ final class CanvasSurface: MTKView {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesEnded(touches, with: event)
+        let historyAction = finishHistoryTapTouches(touches)
+        // Finish the existing touch lifecycle before rebuilding history/selection.
+        defer {
+            if historyAction == 2 { session?.undo() }
+            if historyAction == 3 { session?.redo() }
+        }
         if let selectionTouch, touches.contains(selectionTouch) {
             if let session {
                 session.endSelection(at: session.renderer.canvasPoint(
@@ -270,6 +305,8 @@ final class CanvasSurface: MTKView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesCancelled(touches, with: event)
+        historyTap?.valid = false
+        _ = finishHistoryTapTouches(touches)
         if let selectionTouch, touches.contains(selectionTouch) {
             session?.cancelSelection()
             self.selectionTouch = nil
@@ -285,6 +322,59 @@ final class CanvasSurface: MTKView {
             hideBrushCursor()
         }
         removeEndedFingers(touches)
+    }
+
+    private func trackHistoryTapBegan(_ touches: Set<UITouch>) {
+        if touches.contains(where: { $0.type == .pencil }) { historyTap?.valid = false }
+        let fingers = touches.filter { $0.type == .direct }
+        guard !fingers.isEmpty, let renderer = session?.renderer else { return }
+        if historyTap == nil {
+            historyTap = HistoryTap(started: fingers.map(\.timestamp).min() ?? 0,
+                valid: pencilTouch == nil && selectionTouch?.type != .pencil && pickingTouch?.type != .pencil
+                    && !touches.contains(where: { $0.type == .pencil }),
+                zoom: renderer.zoom, rotation: renderer.rotation, pan: renderer.pan)
+        }
+        for finger in fingers {
+            historyTap?.origins[finger] = finger.location(in: self)
+            historyTap?.active.insert(finger)
+        }
+        guard var tap = historyTap else { return }
+        tap.peakTouches = max(tap.peakTouches, tap.active.count)
+        if tap.origins.count > 3 { tap.valid = false }
+        historyTap = tap
+    }
+
+    private func trackHistoryTapMovement(_ touches: Set<UITouch>) {
+        guard let tap = historyTap, tap.valid else { return }
+        for touch in touches {
+            guard let origin = tap.origins[touch] else { continue }
+            let point = touch.location(in: self)
+            if hypot(point.x - origin.x, point.y - origin.y) > 10 {
+                historyTap?.valid = false
+                return
+            }
+        }
+    }
+
+    private func finishHistoryTapTouches(_ touches: Set<UITouch>) -> Int? {
+        trackHistoryTapMovement(touches)
+        guard var tap = historyTap else { return nil }
+        tap.active.subtract(touches)
+        historyTap = tap
+        guard tap.active.isEmpty else { return nil }
+        historyTap = nil
+        let ended = touches.map(\.timestamp).max() ?? tap.started
+        let count = tap.origins.count
+        guard tap.valid, (2...3).contains(count), tap.peakTouches == count,
+              ended - tap.started <= 0.35 else { return nil }
+        // Ignore tiny incidental motion during a tap, preserving the viewport.
+        if let renderer = session?.renderer {
+            renderer.zoom = tap.zoom
+            renderer.rotation = tap.rotation
+            renderer.pan = tap.pan
+            setNeedsDisplay()
+        }
+        return count
     }
 
     private func pressure(for touch: UITouch) -> CGFloat {

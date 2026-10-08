@@ -13,10 +13,16 @@ struct VerticalDragProperty: UIViewRepresentable {
     let begin: () -> Void
     let change: (Double) -> Void
     let end: (Bool) -> Void
+    var emphasized = false
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeUIView(context: Context) -> VerticalPropertyView { VerticalPropertyView() }
     func updateUIView(_ view: VerticalPropertyView, context: Context) {
-        view.configure(text: text, label: label, value: value, begin: begin, change: change, end: end)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        view.configure(text: text, label: label, value: value, begin: begin, change: change, end: end,
+                       enabled: isEnabled, emphasized: emphasized)
     }
     static func dismantleUIView(_ view: VerticalPropertyView, coordinator: ()) { view.finish(commit: false) }
 }
@@ -57,7 +63,11 @@ final class VerticalPropertyView: UIView, UIGestureRecognizerDelegate {
     }
     func configure(text: String, label: String, value: VerticalDragProperty.Value,
                    begin: @escaping () -> Void, change: @escaping (Double) -> Void,
-                   end: @escaping (Bool) -> Void) {
+                   end: @escaping (Bool) -> Void, enabled: Bool, emphasized: Bool) {
+        if !enabled { finish(commit: false) }
+        isUserInteractionEnabled = enabled
+        title.textColor = UIColor.white.withAlphaComponent(enabled ? (emphasized ? 0.95 : 0.65) : 0.3)
+        accessibilityTraits = enabled ? [.adjustable] : [.adjustable, .notEnabled]
         title.text = text
         accessibilityLabel = label
         if case .choice(let index, let options) = value, options.indices.contains(index) {
@@ -157,6 +167,7 @@ final class VerticalPropertyView: UIView, UIGestureRecognizerDelegate {
     override func accessibilityIncrement() { adjustAccessibility(1) }
     override func accessibilityDecrement() { adjustAccessibility(-1) }
     private func adjustAccessibility(_ direction: Double) {
+        guard isUserInteractionEnabled else { return }
         onBegin?()
         switch value {
         case .number(let number, let range, _):

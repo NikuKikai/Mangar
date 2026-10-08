@@ -7,7 +7,7 @@ struct LoadedProject {
 }
 
 private struct PageState: Codable {
-    var version = 2
+    var version = 3
     var page: PageRecord
     var tileFiles: [String: String]
 }
@@ -49,7 +49,7 @@ struct ProjectStore {
         var tiles: [TileKey: Data] = [:]
         if manager.fileExists(atPath: stateURL.path) {
             let state = try JSONDecoder().decode(PageState.self, from: Data(contentsOf: stateURL))
-            guard state.version == 2 else { throw StoreError.unsupportedVersion }
+            guard (2...3).contains(state.version) else { throw StoreError.unsupportedVersion }
             page = state.page
             for (name, filename) in state.tileFiles {
                 guard let key = tileKey(name), filename == URL(fileURLWithPath: filename).lastPathComponent,
@@ -57,7 +57,9 @@ struct ProjectStore {
                 let file = directory.appendingPathComponent("tiles", isDirectory: true)
                     .appendingPathComponent(filename)
                 guard manager.fileExists(atPath: file.path) else { throw StoreError.missingTile }
-                tiles[key] = try TileCodec.decode(Data(contentsOf: file))
+                let decoded = try TileCodec.decode(Data(contentsOf: file))
+                guard decoded.count == key.rawSize else { throw StoreError.missingTile }
+                tiles[key] = decoded
             }
         } else {
             let metadata = directory.appendingPathComponent("page.json")
@@ -106,7 +108,10 @@ struct ProjectStore {
             throw StoreError.incompleteMigration
         }
         let validLayers = Set(page.layers.map(\.id))
-        let retainedKeys = allTileKeys.filter { validLayers.contains($0.layerID) }
+        let maskedLayers = Set(page.layers.filter(\.hasMask).map(\.id))
+        let retainedKeys = allTileKeys.filter {
+            validLayers.contains($0.layerID) && ($0.target == .content || maskedLayers.contains($0.layerID))
+        }
         var files = previous?.tileFiles.filter { name, _ in
             tileKey(name).map { retainedKeys.contains($0) } ?? false
         } ?? [:]
@@ -114,6 +119,7 @@ struct ProjectStore {
             throw StoreError.incompleteMigration
         }
         for (key, raw) in changedTiles where retainedKeys.contains(key) {
+            guard raw.count == key.rawSize else { throw StoreError.missingTile }
             let filename = UUID().uuidString + ".tile"
             try TileCodec.encode(raw).write(to: tileDirectory.appendingPathComponent(filename),
                                             options: .atomic)
@@ -196,13 +202,14 @@ struct ProjectStore {
     }
 
     private func tileName(_ key: TileKey) -> String {
-        "\(key.layerID.uuidString)_\(key.x)_\(key.y)"
+        "\(key.layerID.uuidString)_\(key.target == .mask ? "mask_" : "")\(key.x)_\(key.y)"
     }
 
     private func tileKey(_ name: String) -> TileKey? {
         let parts = name.split(separator: "_")
-        guard parts.count == 3, let id = UUID(uuidString: String(parts[0])),
-              let x = Int(parts[1]), let y = Int(parts[2]) else { return nil }
-        return TileKey(layerID: id, x: x, y: y)
+        let masked = parts.count == 4 && parts[1] == "mask"
+        guard parts.count == 3 || masked, let id = UUID(uuidString: String(parts[0])),
+              let x = Int(parts[masked ? 2 : 1]), let y = Int(parts[masked ? 3 : 2]) else { return nil }
+        return TileKey(layerID: id, x: x, y: y, target: masked ? .mask : .content)
     }
 }

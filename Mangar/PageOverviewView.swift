@@ -41,7 +41,7 @@ struct PageOverviewView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(red: 0.115, green: 0.12, blue: 0.13))
-        .buttonStyle(.plain)
+        .buttonStyle(ImmediateButtonStyle())
         .scrollDisabled(dragging != nil)
         .overlay {
             if let id = menuPage { pageMenu(id) }
@@ -136,7 +136,7 @@ struct PageOverviewView: View {
                             .aspectRatio(contentMode: .fit)
                             .padding(5)
                     } else {
-                        ProgressView().controlSize(.small)
+                        Text("处理中…").font(.system(size: 10)).foregroundStyle(.secondary)
                     }
                     if spread {
                         Rectangle().fill(Color.gray.opacity(0.45))

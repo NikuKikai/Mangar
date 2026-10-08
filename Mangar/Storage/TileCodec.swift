@@ -8,8 +8,8 @@ enum TileCodec {
     static let rawSize = CanvasConstants.tileSize * CanvasConstants.tileSize * 4
 
     static func encode(_ pixels: Data) throws -> Data {
-        guard pixels.count == rawSize else { throw CodecError.invalidTile }
-        var compressed = Data(count: rawSize * 2)
+        guard pixels.count == rawSize || pixels.count == rawSize / 4 else { throw CodecError.invalidTile }
+        var compressed = Data(count: pixels.count * 2)
         let count = compressed.withUnsafeMutableBytes { destination in
             pixels.withUnsafeBytes { source in
                 compression_encode_buffer(destination.bindMemory(to: UInt8.self).baseAddress!,
@@ -21,7 +21,7 @@ enum TileCodec {
         guard count > 0 else { throw CodecError.compressionFailed }
         compressed.count = count
         var result = magic
-        var length = UInt32(rawSize).littleEndian
+        var length = UInt32(pixels.count).littleEndian
         var checksum = checksum(pixels).littleEndian
         withUnsafeBytes(of: &length) { result.append(contentsOf: $0) }
         withUnsafeBytes(of: &checksum) { result.append(contentsOf: $0) }
@@ -37,8 +37,8 @@ enum TileCodec {
         let expectedChecksum = file[8..<16].enumerated().reduce(UInt64(0)) {
             $0 | (UInt64($1.element) << ($1.offset * 8))
         }
-        guard length == rawSize else { throw CodecError.corruptedTile }
-        var result = Data(count: rawSize)
+        guard length == rawSize || length == rawSize / 4 else { throw CodecError.corruptedTile }
+        var result = Data(count: Int(length))
         let count = result.withUnsafeMutableBytes { destination in
             file.dropFirst(16).withUnsafeBytes { source in
                 compression_decode_buffer(destination.bindMemory(to: UInt8.self).baseAddress!,
@@ -47,7 +47,7 @@ enum TileCodec {
                                           source.count, nil, COMPRESSION_LZFSE)
             }
         }
-        guard count == rawSize, checksum(result) == expectedChecksum else {
+        guard count == Int(length), checksum(result) == expectedChecksum else {
             throw CodecError.corruptedTile
         }
         return result

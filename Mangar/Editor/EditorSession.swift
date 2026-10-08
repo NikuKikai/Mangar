@@ -7,11 +7,22 @@ final class EditorSession: ObservableObject {
     @Published private(set) var page: PageRecord
     @Published private(set) var manifest: ProjectManifest
     @Published private(set) var selectedLayerIDs: [UUID]
+    @Published private(set) var selectedEditTarget: LayerEditTarget = .content
     @Published var brush = AppToolPreferences.loadBrush() {
         didSet {
             if brush != oldValue { AppToolPreferences.saveBrush(brush) }
         }
     }
+    @Published var pressureCurve = AppToolPreferences.loadPressureCurve() {
+        didSet {
+            if pressureCurve != oldValue { AppToolPreferences.savePressureCurve(pressureCurve) }
+        }
+    }
+    @Published var usesTransparentColor = AppToolPreferences.loadTransparentColor() {
+        didSet { AppToolPreferences.saveTransparentColor(usesTransparentColor) }
+    }
+    @Published private(set) var colorPresets = AppToolPreferences.loadColorPresets()
+    @Published var showsTargetTint = false
     @Published var selectedTool: DrawingTool = .brush
     @Published var activeModifiers: Set<EditorModifier> = []
     @Published var message: String?
@@ -24,6 +35,12 @@ final class EditorSession: ObservableObject {
     private let store: ProjectStore
     private var history: CommandHistory
     private var activeStroke: StrokeCommand?
+    private var regionTool: DrawingTool?
+    private var selectionPath: [SelectionPoint] = []
+    private var regionBrush: RoundBrush?
+    private var regionErases = false
+    private var regionTarget: LayerEditTarget = .content
+    private var regionLayerID: UUID?
     private var selectionStart: CGPoint?
     private var selectionMode: SelectionCombineMode = .replace
     private var layerPropertyOriginal: [LayerRecord]?
@@ -56,21 +73,26 @@ final class EditorSession: ObservableObject {
         !selectedLayers.allSatisfy(\.isLocked)
     }
     var canDeleteSelection: Bool {
-        !selectedLayerIDs.isEmpty && selectedLayerIDs.allSatisfy(canDeleteLayer)
+        if selectedEditTarget == .mask {
+            return selectedLayer.map { $0.hasMask && !page.isEffectivelyLocked($0.id) } ?? false
+        }
+        return !selectedLayerIDs.isEmpty && selectedLayerIDs.allSatisfy(canDeleteLayer)
     }
     var pageNumber: Int {
         manifest.firstPageNumber(for: page.id)
     }
 
     func beginStroke(at point: CGPoint, pressure: CGFloat) {
-        guard selectedTool != .selection else { return }
+        guard !selectedTool.isRegionTool else { return }
         guard let selectedLayerID, renderer.isInsideCanvas(point),
-              page.layers.contains(where: { $0.id == selectedLayerID && $0.kind == .paint }),
+              page.layers.contains(where: { $0.id == selectedLayerID &&
+                  (selectedEditTarget == .mask ? $0.hasMask : $0.kind == .paint) }),
               page.isEffectivelyVisible(selectedLayerID),
               !page.isEffectivelyLocked(selectedLayerID) else { return }
         activeStroke = StrokeCommand(layerID: selectedLayerID,
-                                     samples: [sample(point, pressure)], brush: brush,
-                                     seed: UInt64.random(in: 1...UInt64.max), tool: selectedTool)
+                                     samples: [sample(point, pressure)], brush: editingBrush,
+                                     seed: UInt64.random(in: 1...UInt64.max), tool: usesTransparentColor ? .eraser : selectedTool,
+                                     target: selectedEditTarget)
         renderer.preview(activeStroke!)
     }
 
@@ -99,34 +121,80 @@ final class EditorSession: ObservableObject {
     }
 
     func beginSelection(at point: CGPoint, shift: Bool, option: Bool) {
-        guard selectedTool == .selection else { return }
+        guard selectedTool.isRegionTool else { return }
+        endStroke()
+        cancelSelection()
+        if selectedTool == .lassoFill {
+            guard let layer = selectedLayer,
+                  (selectedEditTarget == .mask ? layer.hasMask : layer.kind == .paint),
+                  page.isEffectivelyVisible(layer.id), !page.isEffectivelyLocked(layer.id) else { return }
+            regionLayerID = layer.id
+            regionBrush = editingBrush
+            regionErases = usesTransparentColor
+            regionTarget = selectedEditTarget
+        }
+        regionTool = selectedTool
         selectionStart = point
+        selectionPath = [SelectionPoint(x: point.x, y: point.y)]
         selectionMode = shift && option ? .intersect :
             shift ? .add : option ? .subtract : .replace
-        renderer.previewSelection(from: point, to: point)
+        if selectedTool == .selection { renderer.previewSelection(from: point, to: point) }
+        else { renderer.previewLasso(selectionPath) }
     }
 
-    func updateSelection(to point: CGPoint) {
-        guard let selectionStart else { return }
-        renderer.previewSelection(from: selectionStart, to: point)
+    func updateSelection(to point: CGPoint) { updateSelection(along: [point]) }
+
+    func updateSelection(along points: [CGPoint]) {
+        guard let selectionStart, let point = points.last else { return }
+        if regionTool == .selection {
+            renderer.previewSelection(from: selectionStart, to: point)
+        } else {
+            var changed = false
+            for point in points {
+                if let last = selectionPath.last,
+                   hypot(point.x - last.x, point.y - last.y) * renderer.zoom < 0.75 { continue }
+                selectionPath.append(SelectionPoint(x: point.x, y: point.y))
+                changed = true
+            }
+            if changed { renderer.previewLasso(selectionPath) }
+        }
     }
 
     func endSelection(at point: CGPoint) {
-        guard let start = selectionStart else { return }
-        selectionStart = nil
-        renderer.clearSelectionPreview()
+        guard let start = selectionStart, let tool = regionTool else { return }
+        updateSelection(to: point)
+        let path = selectionPath
+        let fillBrush = regionBrush
+        let fillLayerID = regionLayerID
+        let fillTarget = regionTarget
+        let fillErases = regionErases
+        let mode = selectionMode
+        cancelSelection()
+        if tool != .selection {
+            guard path.count >= 3 else { return }
+            if tool == .lassoFill, let fillLayerID, let fillBrush,
+               page.isEffectivelyVisible(fillLayerID), !page.isEffectivelyLocked(fillLayerID) {
+                perform(.lassoFill(LassoFillCommand(layerID: fillLayerID, points: path, brush: fillBrush, target: fillTarget, erases: fillErases)))
+            } else if tool == .lassoSelection {
+                perform(.selection(.lasso(path, mode)))
+            }
+            return
+        }
         let x0 = max(0, min(Double(page.width), min(start.x, point.x)))
         let y0 = max(0, min(Double(page.height), min(start.y, point.y)))
         let x1 = max(0, min(Double(page.width), max(start.x, point.x)))
         let y1 = max(0, min(Double(page.height), max(start.y, point.y)))
         guard x1 - x0 >= 0.5, y1 - y0 >= 0.5 else { return }
         perform(.selection(.rectangle(SelectionRect(x: x0, y: y0,
-                                                     width: x1 - x0, height: y1 - y0),
-                                       selectionMode)))
+                                                     width: x1 - x0, height: y1 - y0), mode)))
     }
 
     func cancelSelection() {
         selectionStart = nil
+        selectionPath = []
+        regionTool = nil
+        regionLayerID = nil
+        regionBrush = nil
         renderer.clearSelectionPreview()
     }
 
@@ -152,12 +220,15 @@ final class EditorSession: ObservableObject {
 
     func pickColor(at point: CGPoint) {
         guard let color = renderer.sampleColor(at: point) else { return }
+        usesTransparentColor = false
         brush.red = Double(color.x)
         brush.green = Double(color.y)
         brush.blue = Double(color.z)
     }
 
     func selectLayer(_ id: UUID, shift: Bool = false, command: Bool = false) {
+        let previousPrimary = selectedLayerID
+        defer { if previousPrimary != selectedLayerID { selectedEditTarget = .content } }
         guard page.layers.contains(where: { $0.id == id }) else { return }
         if shift, let primaryID = selectedLayerID {
             let displayed = page.layerDisplayEntries.map(\.id)
@@ -181,6 +252,59 @@ final class EditorSession: ObservableObject {
         } else {
             selectedLayerIDs = [id]
         }
+    }
+
+    func selectLayerTarget(_ id: UUID, target: LayerEditTarget,
+                           shift: Bool = false, command: Bool = false) {
+        endStroke()
+        cancelSelection()
+        selectLayer(id, shift: shift, command: command)
+        if selectedLayerID == id, target == .content || selectedLayer?.hasMask == true {
+            selectedEditTarget = target
+        }
+    }
+
+    var canAddLayerMask: Bool {
+        guard let layer = selectedLayer else { return false }
+        return !layer.hasMask && !page.isEffectivelyLocked(layer.id)
+    }
+
+    func addLayerMask() {
+        guard canAddLayerMask, let id = selectedLayerID,
+              let index = page.layers.firstIndex(where: { $0.id == id }) else { return }
+        endStroke()
+        cancelSelection()
+        endLayerPropertyEdit()
+        var updated = page.layers
+        updated[index].hasMask = true
+        perform(.replaceLayerStack(updated))
+        selectedEditTarget = .mask
+    }
+
+    func useColorPreset(_ index: Int) {
+        guard colorPresets.indices.contains(index) else { return }
+        let color = colorPresets[index]
+        endStroke()
+        usesTransparentColor = false
+        var updated = brush
+        updated.red = color.red; updated.green = color.green; updated.blue = color.blue
+        updated.opacity = color.opacity
+        brush = updated
+    }
+
+    func storeColorPreset(_ index: Int) {
+        guard colorPresets.indices.contains(index) else { return }
+        colorPresets[index] = AppColor(brush)
+        AppToolPreferences.saveColorPresets(colorPresets)
+    }
+
+    private var editingBrush: RoundBrush {
+        var result = brush
+        if selectedEditTarget == .mask {
+            let gray = min(1, max(0, brush.red * 0.2126 + brush.green * 0.7152 + brush.blue * 0.0722))
+            result.red = gray; result.green = gray; result.blue = gray
+        }
+        return result
     }
 
     var selectedToneWillEnable: Bool {
@@ -209,6 +333,18 @@ final class EditorSession: ObservableObject {
             if let density { tone.density = min(1, max(0, density)) }
             layer.tone = tone
         }
+    }
+
+    func renameLayer(_ id: UUID, to name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        endStroke()
+        endLayerPropertyEdit()
+        guard let index = page.layers.firstIndex(where: { $0.id == id }),
+              page.layers[index].name != name else { return }
+        var updated = page.layers
+        updated[index].name = name
+        perform(.replaceLayerStack(updated))
     }
 
     func beginLayerPropertyEdit(_ id: UUID) {
@@ -273,11 +409,21 @@ final class EditorSession: ObservableObject {
         }
         perform(.replaceLayerStack(updated))
         selectedLayerIDs = [layer.id]
+        selectedEditTarget = .content
     }
 
     func deleteSelectedLayer() {
         guard canDeleteSelection else { return }
         cancelStroke()
+        cancelSelection()
+        endLayerPropertyEdit()
+        if selectedEditTarget == .mask, let id = selectedLayerID,
+           let index = page.layers.firstIndex(where: { $0.id == id }) {
+            var updated = page.layers
+            updated[index].hasMask = false
+            perform(.replaceLayerStack(updated))
+            return
+        }
         var removed = Set<UUID>()
         for id in selectedLayerIDs {
             guard let range = page.subtreeRange(of: id) else { continue }
@@ -286,6 +432,19 @@ final class EditorSession: ObservableObject {
         var updated = page.layers
         updated.removeAll { removed.contains($0.id) }
         perform(.replaceLayerStack(updated))
+    }
+
+    var canClearSelectedTarget: Bool {
+        guard let layer = selectedLayer, !page.isEffectivelyLocked(layer.id) else { return false }
+        return selectedEditTarget == .mask ? layer.hasMask : layer.kind == .paint
+    }
+
+    func clearSelectedTarget() {
+        guard canClearSelectedTarget, let id = selectedLayerID else { return }
+        endStroke()
+        cancelSelection()
+        endLayerPropertyEdit()
+        perform(.clearLayer(ClearLayerCommand(layerID: id, target: selectedEditTarget)))
     }
 
     private func canDeleteLayer(_ id: UUID) -> Bool {
@@ -333,6 +492,8 @@ final class EditorSession: ObservableObject {
 
     func undo() {
         endLayerPropertyEdit()
+        cancelStroke()
+        cancelSelection()
         guard history.canUndo else { return }
         let command = history.commands[history.cursor - 1]
         history.cursor -= 1
@@ -345,6 +506,8 @@ final class EditorSession: ObservableObject {
 
     func redo() {
         endLayerPropertyEdit()
+        cancelStroke()
+        cancelSelection()
         guard history.canRedo else { return }
         let command = history.commands[history.cursor]
         history.cursor += 1
@@ -546,9 +709,13 @@ final class EditorSession: ObservableObject {
         }
     }
 
+    func mappedPressure(_ pressure: CGFloat) -> Double {
+        pressureCurve.map(Double(pressure))
+    }
+
     private func sample(_ point: CGPoint, _ pressure: CGFloat) -> StrokeSample {
         StrokeSample(x: Double(point.x), y: Double(point.y),
-                     pressure: Double(min(1, max(0.15, pressure))))
+                     pressure: mappedPressure(pressure))
     }
 
     private func perform(_ command: EditCommand) {
@@ -585,13 +752,21 @@ final class EditorSession: ObservableObject {
     }
 
     private func reconcileLayerSelection() {
+        let previousPrimary = selectedLayerID
         let existing = Set(page.layers.map(\.id))
         let kept = selectedLayerIDs.filter { existing.contains($0) }
         selectedLayerIDs = kept.isEmpty ? page.layers.last.map { [$0.id] } ?? [] : kept
+        if previousPrimary != selectedLayerID || selectedLayer?.hasMask != true { selectedEditTarget = .content }
     }
 
     private func apply(_ command: EditCommand) {
         switch command {
+        case .clearLayer(let clear):
+            guard page.layers.contains(where: { $0.id == clear.layerID }) else { return }
+            renderer.commitClear(clear)
+        case .lassoFill(let fill):
+            guard page.layers.contains(where: { $0.id == fill.layerID }) else { return }
+            renderer.commitLassoFill(fill)
         case .stroke(let stroke):
             guard page.layers.contains(where: { $0.id == stroke.layerID }) else { return }
             renderer.commit(stroke)
@@ -616,6 +791,9 @@ final class EditorSession: ObservableObject {
             let retained = Set(layers.map(\.id))
             for old in page.layers where !retained.contains(old.id) {
                 renderer.removeTiles(for: old.id)
+            }
+            for old in page.layers where old.hasMask && layers.contains(where: { $0.id == old.id && !$0.hasMask }) {
+                renderer.removeTiles(for: old.id, target: .mask)
             }
             page.layers = layers
         }
@@ -653,6 +831,7 @@ final class EditorSession: ObservableObject {
         renderer.restore(tiles)
         renderer.resetViewport()
         selectedLayerIDs = newPage.layers.last.map { [$0.id] } ?? []
+        selectedEditTarget = .content
         history = CommandHistory(checkpoint: DocumentCheckpoint(page: newPage, tiles: tiles))
         historyRevision += 1
     }

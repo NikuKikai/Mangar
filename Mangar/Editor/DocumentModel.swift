@@ -63,7 +63,7 @@ struct LayerToneEffect: Codable, Equatable {
     var isEnabled: Bool = true
     var frequency: Double = 60
     var angle: Double = 45
-    var density: Double = 0.5
+    var density: Double = 1
 }
 
 struct LayerRecord: Codable, Identifiable, Equatable {
@@ -77,6 +77,7 @@ struct LayerRecord: Codable, Identifiable, Equatable {
     var opacity: Double = 1
     var blendMode: LayerBlendMode = .normal
     var tone: LayerToneEffect? = nil
+    var hasMask: Bool = false
     var isLocked: Bool = false
     /// Bounds of a procedural background after page merge/split.
     var paperBounds: CGRect? = nil
@@ -84,7 +85,7 @@ struct LayerRecord: Codable, Identifiable, Equatable {
 
 extension LayerRecord {
     private enum CodingKeys: String, CodingKey {
-        case id, name, kind, parentID, isVisible, opacity, blendMode, tone, isLocked, paperBounds
+        case id, name, kind, parentID, isVisible, opacity, blendMode, tone, hasMask, isLocked, paperBounds
     }
 
     init(from decoder: Decoder) throws {
@@ -97,6 +98,7 @@ extension LayerRecord {
         opacity = try values.decode(Double.self, forKey: .opacity)
         blendMode = try values.decodeIfPresent(LayerBlendMode.self, forKey: .blendMode) ?? .normal
         tone = try values.decodeIfPresent(LayerToneEffect.self, forKey: .tone)
+        hasMask = try values.decodeIfPresent(Bool.self, forKey: .hasMask) ?? false
         isLocked = try values.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
         paperBounds = try values.decodeIfPresent(CGRect.self, forKey: .paperBounds)
     }
@@ -254,10 +256,29 @@ extension ProjectManifest {
     }
 }
 
+enum LayerEditTarget: String, Codable {
+    case content, mask
+    var bytesPerPixel: Int { self == .mask ? 1 : 4 }
+    var defaultByte: UInt8 { self == .mask ? 255 : 0 }
+}
+
 struct TileKey: Hashable, Codable {
     var layerID: UUID
     var x: Int
     var y: Int
+    var target: LayerEditTarget = .content
+    var rawSize: Int { CanvasConstants.tileSize * CanvasConstants.tileSize * target.bytesPerPixel }
+}
+
+extension TileKey {
+    private enum CodingKeys: String, CodingKey { case layerID, x, y, target }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        layerID = try c.decode(UUID.self, forKey: .layerID)
+        x = try c.decode(Int.self, forKey: .x)
+        y = try c.decode(Int.self, forKey: .y)
+        target = try c.decodeIfPresent(LayerEditTarget.self, forKey: .target) ?? .content
+    }
 }
 
 struct StrokeSample: Codable, Equatable {
@@ -280,7 +301,10 @@ struct RoundBrush: Codable, Equatable {
 }
 
 enum DrawingTool: String, Codable {
-    case brush, eraser, selection
+    case brush, eraser, selection, lassoSelection, lassoFill
+
+    var isSelectionTool: Bool { self == .selection || self == .lassoSelection }
+    var isRegionTool: Bool { isSelectionTool || self == .lassoFill }
 }
 
 enum SelectionCombineMode: String, Codable {
@@ -294,7 +318,22 @@ struct SelectionRect: Codable {
     var height: Double
 }
 
+struct SelectionPoint: Codable {
+    var x: Double
+    var y: Double
+    var cgPoint: CGPoint { CGPoint(x: x, y: y) }
+}
+
+struct LassoFillCommand: Codable {
+    var layerID: UUID
+    var points: [SelectionPoint]
+    var brush: RoundBrush
+    var target: LayerEditTarget = .content
+    var erases: Bool = false
+}
+
 enum SelectionCommand: Codable {
+    case lasso([SelectionPoint], SelectionCombineMode)
     case rectangle(SelectionRect, SelectionCombineMode)
     case selectAll
     case invert
@@ -329,9 +368,17 @@ struct StrokeCommand: Codable {
     var brush: RoundBrush
     var seed: UInt64
     var tool: DrawingTool
+    var target: LayerEditTarget = .content
+}
+
+struct ClearLayerCommand: Codable {
+    var layerID: UUID
+    var target: LayerEditTarget
 }
 
 enum EditCommand: Codable {
+    case clearLayer(ClearLayerCommand)
+    case lassoFill(LassoFillCommand)
     case stroke(StrokeCommand)
     case selection(SelectionCommand)
     case addLayer(LayerRecord, Int)

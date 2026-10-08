@@ -64,11 +64,10 @@ enum PageConversion {
             var layer = original
             layer.id = ids[original.id]!
             layer.parentID = original.parentID.flatMap { ids[$0] } ?? group?.id
-            if original.kind == .solidWhite {
-                let bounds = original.paperBounds ?? CGRect(x: 0, y: 0,
-                                    width: source.page.width, height: source.page.height)
-                let cropped = bounds.intersection(clip)
-                layer.paperBounds = cropped.isNull ? .zero : cropped.offsetBy(dx: CGFloat(offset), dy: 0)
+            if var shape = original.shape, original.kind == .shape {
+                let cropped = shape.bounds.intersection(clip)
+                shape.bounds = cropped.isNull ? .zero : cropped.offsetBy(dx: CGFloat(offset), dy: 0)
+                layer.shape = shape
             }
             output.page.layers.append(layer)
         }

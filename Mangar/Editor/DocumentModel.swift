@@ -67,7 +67,7 @@ struct LayerToneEffect: Codable, Equatable {
 }
 
 struct LayerRecord: Codable, Identifiable, Equatable {
-    enum Kind: String, Codable { case paint, folder, solidWhite }
+    enum Kind: String, Codable { case paint, folder, shape }
 
     var id: UUID = UUID()
     var name: String
@@ -79,20 +79,24 @@ struct LayerRecord: Codable, Identifiable, Equatable {
     var tone: LayerToneEffect? = nil
     var hasMask: Bool = false
     var isLocked: Bool = false
-    /// Bounds of a procedural background after page merge/split.
-    var paperBounds: CGRect? = nil
+    var shape: LayerShape? = nil
 }
 
 extension LayerRecord {
     private enum CodingKeys: String, CodingKey {
-        case id, name, kind, parentID, isVisible, opacity, blendMode, tone, hasMask, isLocked, paperBounds
+        case id, name, kind, parentID, isVisible, opacity, blendMode, tone, hasMask, isLocked, shape
     }
+
+    private enum LegacyKeys: String, CodingKey { case paperBounds }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
         name = try values.decode(String.self, forKey: .name)
-        kind = try values.decode(Kind.self, forKey: .kind)
+        let rawKind = try values.decode(String.self, forKey: .kind)
+        if rawKind == "solidWhite" { kind = .shape }
+        else if let decoded = Kind(rawValue: rawKind) { kind = decoded }
+        else { throw DecodingError.dataCorruptedError(forKey: .kind, in: values, debugDescription: "Unknown layer kind") }
         parentID = try values.decodeIfPresent(UUID.self, forKey: .parentID)
         isVisible = try values.decode(Bool.self, forKey: .isVisible)
         opacity = try values.decode(Double.self, forKey: .opacity)
@@ -100,7 +104,11 @@ extension LayerRecord {
         tone = try values.decodeIfPresent(LayerToneEffect.self, forKey: .tone)
         hasMask = try values.decodeIfPresent(Bool.self, forKey: .hasMask) ?? false
         isLocked = try values.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
-        paperBounds = try values.decodeIfPresent(CGRect.self, forKey: .paperBounds)
+        shape = try values.decodeIfPresent(LayerShape.self, forKey: .shape)
+        if rawKind == "solidWhite", let bounds = try decoder.container(keyedBy: LegacyKeys.self)
+            .decodeIfPresent(CGRect.self, forKey: .paperBounds) {
+            shape = .rect(bounds: bounds, fill: .white)
+        }
     }
 }
 
@@ -218,8 +226,30 @@ struct PageRecord: Codable, Identifiable, Equatable {
                       isSpread: Bool = false) -> PageRecord {
         PageRecord(name: name, width: width,
                    height: height, comicLayout: comicLayout, isSpread: isSpread,
-                   layers: [LayerRecord(name: "背景", kind: .solidWhite, isLocked: true),
+                   layers: [LayerRecord(name: "背景", kind: .shape, isLocked: true,
+                       shape: .rect(bounds: CGRect(x: 0, y: 0, width: width, height: height), fill: .white)),
                             LayerRecord(name: "图层 1")])
+    }
+}
+
+extension PageRecord {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, width, height, comicLayout, isSpread, backgroundSchemaVersion, layers
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        width = try values.decode(Int.self, forKey: .width)
+        height = try values.decode(Int.self, forKey: .height)
+        comicLayout = try values.decodeIfPresent(ComicPageLayout.self, forKey: .comicLayout)
+        isSpread = try values.decodeIfPresent(Bool.self, forKey: .isSpread)
+        backgroundSchemaVersion = try values.decodeIfPresent(Int.self, forKey: .backgroundSchemaVersion)
+        layers = try values.decode([LayerRecord].self, forKey: .layers)
+        // Legacy solidWhite layers without bounds meant the entire owning page.
+        for index in layers.indices where layers[index].kind == .shape && layers[index].shape == nil {
+            layers[index].shape = .rect(bounds: CGRect(x: 0, y: 0, width: width, height: height), fill: .white)
+        }
     }
 }
 

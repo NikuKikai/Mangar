@@ -32,6 +32,7 @@ private struct LayerCompositeUniforms {
     var padding: UInt32 = 0
     var tone: SIMD4<Float> = .zero
     var canvasMap: SIMD4<Float> = .zero
+    var solidColor: SIMD4<Float> = SIMD4<Float>(repeating: 1)
 }
 
 struct SelectionTileKey: Hashable {
@@ -105,7 +106,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private let layerCompositePipeline: MTLRenderPipelineState
     private var groupTargets: [Int: MTLTexture] = [:]
     private let tilePipeline: MTLRenderPipelineState
-    private let paperPipeline: MTLRenderPipelineState
+    private let shapePipeline: MTLRenderPipelineState
     private let checkerPipeline: MTLRenderPipelineState
     private let selectionOutlinePipeline: MTLRenderPipelineState
     private let selectionRectPipeline: MTLRenderPipelineState
@@ -165,7 +166,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
               let tileFragment = library.makeFunction(name: "tileFragment"),
               let layerCompositeFragment = library.makeFunction(name: usesRasterOrderGroups
                 ? "layerCompositeFragment" : "layerCompositeFallbackFragment"),
-              let paperFragment = library.makeFunction(name: "paperFragment"),
+              let shapeFragment = library.makeFunction(name: "shapeFragment"),
               let checkerFragment = library.makeFunction(name: "checkerFragment"),
               let selectionOutlineFragment = library.makeFunction(name: "selectionOutlineFragment"),
               let selectionRectFragment = library.makeFunction(name: "selectionRectOutlineFragment"),
@@ -214,13 +215,19 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         compositeDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         self.layerCompositePipeline = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
 
-        let paperDescriptor = MTLRenderPipelineDescriptor()
-        paperDescriptor.vertexFunction = vertex
-        paperDescriptor.fragmentFunction = paperFragment
-        paperDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-        self.paperPipeline = try device.makeRenderPipelineState(descriptor: paperDescriptor)
-        paperDescriptor.fragmentFunction = checkerFragment
-        self.checkerPipeline = try device.makeRenderPipelineState(descriptor: paperDescriptor)
+        let shapeDescriptor = MTLRenderPipelineDescriptor()
+        shapeDescriptor.vertexFunction = vertex
+        shapeDescriptor.fragmentFunction = shapeFragment
+        shapeDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        let shapeAttachment = shapeDescriptor.colorAttachments[0]!
+        shapeAttachment.isBlendingEnabled = true
+        shapeAttachment.sourceRGBBlendFactor = .one
+        shapeAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        shapeAttachment.sourceAlphaBlendFactor = .one
+        shapeAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        self.shapePipeline = try device.makeRenderPipelineState(descriptor: shapeDescriptor)
+        shapeDescriptor.fragmentFunction = checkerFragment
+        self.checkerPipeline = try device.makeRenderPipelineState(descriptor: shapeDescriptor)
         let outlineDescriptor = MTLRenderPipelineDescriptor()
         outlineDescriptor.vertexFunction = vertex
         outlineDescriptor.fragmentFunction = selectionOutlineFragment
@@ -1064,12 +1071,15 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         } else {
         for layer in page.layers where page.isEffectivelyVisible(layer.id) {
-            if layer.kind == .solidWhite {
-                let bounds = layer.paperBounds ?? CGRect(x: 0, y: 0, width: page.width, height: page.height)
+            if layer.kind == .shape {
+                guard let shape = layer.shape, !shape.bounds.isEmpty else { continue }
+                let bounds = shape.bounds
                 var background = paper
                 background.origin = SIMD2<Float>(Float(bounds.minX), Float(bounds.minY))
                 background.size = SIMD2<Float>(Float(bounds.width), Float(bounds.height))
-                encoder.setRenderPipelineState(paperPipeline)
+                encoder.setRenderPipelineState(shapePipeline)
+                var color = shape.fill.premultiplied
+                encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
                 encoder.setVertexBytes(&background, length: MemoryLayout<QuadUniforms>.stride, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
                 continue
@@ -1209,9 +1219,11 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                 encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerCompositeUniforms>.stride, index: 0)
                 encoder.setFragmentTexture(child, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-            } else if layer.kind == .solidWhite {
+            } else if layer.kind == .shape {
+                guard let shape = layer.shape, !shape.bounds.isEmpty else { continue }
                 guard let encoder else { return nil }
-                let rect = layer.paperBounds ?? CGRect(x: 0, y: 0, width: page.width, height: page.height)
+                let rect = shape.bounds
+                uniforms.solidColor = shape.fill.premultiplied
                 var quad = QuadUniforms(origin: SIMD2<Float>(Float(rect.minX), Float(rect.minY)),
                     size: SIMD2<Float>(Float(rect.width), Float(rect.height)), viewport: vp,
                     zoom: zoom, rotation: rotation, pan: pan)

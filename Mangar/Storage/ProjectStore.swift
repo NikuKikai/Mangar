@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 struct LoadedProject {
     var manifest: ProjectManifest
@@ -7,7 +8,7 @@ struct LoadedProject {
 }
 
 private struct PageState: Codable {
-    var version = 3
+    var version = 4
     var page: PageRecord
     var tileFiles: [String: String]
 }
@@ -49,7 +50,7 @@ struct ProjectStore {
         var tiles: [TileKey: Data] = [:]
         if manager.fileExists(atPath: stateURL.path) {
             let state = try JSONDecoder().decode(PageState.self, from: Data(contentsOf: stateURL))
-            guard (2...3).contains(state.version) else { throw StoreError.unsupportedVersion }
+            guard (2...4).contains(state.version) else { throw StoreError.unsupportedVersion }
             page = state.page
             for (name, filename) in state.tileFiles {
                 guard let key = tileKey(name), filename == URL(fileURLWithPath: filename).lastPathComponent,
@@ -76,9 +77,9 @@ struct ProjectStore {
             }
         }
         if page.backgroundSchemaVersion != 3 {
-            if !page.layers.contains(where: { $0.kind == .solidWhite }) {
-                page.layers.insert(LayerRecord(name: "背景", kind: .solidWhite,
-                                               isLocked: true), at: 0)
+            if !page.layers.contains(where: { $0.kind == .shape }) {
+                page.layers.insert(LayerRecord(name: "背景", kind: .shape, isLocked: true,
+                    shape: .rect(bounds: CGRect(x: 0, y: 0, width: page.width, height: page.height), fill: .white)), at: 0)
             }
             page.backgroundSchemaVersion = 3
         }

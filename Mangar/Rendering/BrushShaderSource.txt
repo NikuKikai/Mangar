@@ -155,8 +155,8 @@ fragment float4 tileFragment(QuadOutput in [[stage_in]],
     return tile.sample(s, in.uv);
 }
 
-fragment float4 paperFragment(QuadOutput in [[stage_in]]) {
-    return float4(1, 1, 1, 1);
+fragment float4 shapeFragment(QuadOutput in [[stage_in]], constant float4 &color [[buffer(0)]]) {
+    return color;
 }
 
 fragment float4 checkerFragment(QuadOutput in [[stage_in]]) {
@@ -266,6 +266,7 @@ struct LayerCompositeUniforms {
     uint padding;
     float4 tone; // period in canvas pixels, angle in radians, density, enabled
     float4 canvasMap; // cos(rotation)/zoom, sin(rotation)/zoom, view pan x/y
+    float4 solidColor; // Premultiplied graphic fill; mask visualization uses white.
 };
 struct LayerCompositeOutput {
     float4 color [[color(0), raster_order_group(0)]];
@@ -329,7 +330,7 @@ fragment LayerCompositeOutput layerCompositeFragment(
     constant LayerCompositeUniforms &u [[buffer(0)]],
     float4 destination [[color(0), raster_order_group(0)]]) {
     constexpr sampler samplerNearest(coord::normalized, address::clamp_to_edge, filter::nearest);
-    float4 source = u.solid != 0 ? float4(1.0) : tile.sample(samplerNearest, in.uv);
+    float4 source = u.solid != 0 ? u.solidColor : tile.sample(samplerNearest, in.uv);
     source = applyLayerTone(source, in.position.xy, u);
     if ((u.padding & 1u) != 0) source *= layerMask.read(uint2(in.position.xy)).r;
     if ((u.padding & 2u) != 0) source.rgb = float3(0.10, 0.45, 1.0) * source.a;
@@ -343,7 +344,7 @@ fragment float4 layerCompositeFallbackFragment(
     texture2d<float, access::read> layerMask [[texture(2)]],
     constant LayerCompositeUniforms &u [[buffer(0)]]) {
     constexpr sampler samplerNearest(coord::normalized, address::clamp_to_edge, filter::nearest);
-    float4 source = u.solid != 0 ? float4(1.0) : tile.sample(samplerNearest, in.uv);
+    float4 source = u.solid != 0 ? u.solidColor : tile.sample(samplerNearest, in.uv);
     source = applyLayerTone(source, in.position.xy, u);
     if ((u.padding & 1u) != 0) source *= layerMask.read(uint2(in.position.xy)).r;
     if ((u.padding & 2u) != 0) source.rgb = float3(0.10, 0.45, 1.0) * source.a;

@@ -1058,8 +1058,8 @@ private struct EditorWorkspace: View {
     private func layerThumbnail(_ layer: LayerRecord) -> some View {
         ZStack {
             ThumbnailChecker()
-            if layer.kind == .solidWhite {
-                Rectangle().fill(.white)
+            if layer.kind == .shape, let shape = layer.shape, !shape.bounds.isEmpty {
+                Rectangle().fill(Color(red: shape.fill.red, green: shape.fill.green, blue: shape.fill.blue, opacity: shape.fill.alpha))
             } else if let image = session.renderer.thumbnail(for: layer.id) {
                 Image(uiImage: image)
                     .resizable()
@@ -1070,17 +1070,17 @@ private struct EditorWorkspace: View {
         .frame(width: 24, height: 24)
         .overlay(Rectangle().stroke(Color.white.opacity(0.18), lineWidth: 1))
         .overlay(alignment: .bottomTrailing) {
-            if layer.kind == .solidWhite {
-                Image(systemName: "doc.fill")
+            if layer.kind == .shape {
+                Image(systemName: "square.on.circle.fill")
                     .font(.system(size: 8, weight: .medium))
                     .foregroundStyle(.white)
                     .frame(width: 12, height: 12)
                     .background(Color(red: 0.17, green: 0.18, blue: 0.19))
-                    .help("白色背景（特殊图层）")
+                    .help("图形图层")
                     .allowsHitTesting(false)
             }
         }
-        .accessibilityLabel(layer.kind == .solidWhite ? "白色背景图层缩略图" : "绘画图层缩略图")
+        .accessibilityLabel(layer.kind == .shape ? "图形图层缩略图" : "绘画图层缩略图")
     }
 
     private func layerHandleDrag(_ sourceID: UUID) -> some Gesture {

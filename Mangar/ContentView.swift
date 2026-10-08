@@ -257,6 +257,7 @@ private struct EditorWorkspace: View {
     @State private var showToneParameters = false
     @State private var showPressureCurve = false
     @State private var showBrushSettings = false
+    @State private var dynamicsParameter: BrushParameter?
     @State private var brushSettingsAnchor: CGRect = .zero
     @State private var showColorEditor = false
     @State private var collapsedFolders: Set<UUID> = []
@@ -309,7 +310,10 @@ private struct EditorWorkspace: View {
                                  showsBrush: showBrushSettings && workspaceView == .canvas,
                                  brushAnchor: brushSettingsAnchor,
                                  closeColor: { showColorEditor = false },
-                                 closeBrush: { showBrushSettings = false })
+                                 closeBrush: { showBrushSettings = false },
+                                 dynamicsParameter: workspaceView == .canvas ? dynamicsParameter : nil,
+                                 editDynamics: { dynamicsParameter = $0 },
+                                 closeDynamics: { dynamicsParameter = nil })
         }
         .overlay {
             if showAppMenu {
@@ -359,6 +363,7 @@ private struct EditorWorkspace: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             showAppMenu = false
+            session.endStroke()
             session.releaseModifiers()
         }
     }
@@ -486,12 +491,12 @@ private struct EditorWorkspace: View {
                 Text("当前颜色 · 不透明度 \(Int((session.brush.opacity * 100).rounded()))%")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
             } else {
-                Image(systemName: session.selectedTool == .eraser ? "eraser.fill" : "pencil.tip")
-                Text(session.selectedTool == .eraser ? "橡皮擦" : "圆笔")
+                Image(systemName: session.selectedTool == .eraser ? "eraser.fill" : session.brush.preset.icon)
+                Text(session.selectedTool == .eraser ? "橡皮擦" : session.brush.preset.name)
                 if session.selectedEditTarget == .mask {
                     Text("蒙版").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
-                FlatSlider(value: $session.brush.size, range: 1...100)
+                FlatSlider(value: $session.brush.size, range: 1...2000, logarithmic: true)
                     .frame(width: 105)
                 Text("\(Int(session.brush.size)) px")
                     .monospacedDigit()
@@ -551,8 +556,30 @@ private struct EditorWorkspace: View {
 
     private var toolRail: some View {
         VStack(spacing: 2) {
-            toolButton(.brush, icon: "pencil.tip", name: "圆笔")
-                .keyboardShortcut("b", modifiers: [])
+            Button { session.selectBrush(.pencil) } label: {
+                Image(systemName: BrushPresetID.pencil.icon)
+                    .font(.system(size: 17)).frame(width: 34, height: 34)
+                    .background(session.selectedTool == .brush && session.brush.preset == .pencil
+                                ? Color.gray.opacity(0.4) : Color.clear)
+            }
+            .buttonStyle(ImmediateButtonStyle())
+            .keyboardShortcut("p", modifiers: [])
+            .help("铅笔")
+            .accessibilityLabel("铅笔")
+            .accessibilityAddTraits(session.selectedTool == .brush && session.brush.preset == .pencil ? .isSelected : [])
+            SlideSelectToolControl(items: BrushPresetID.inkPresets.map {
+                SlideSelectToolItem(id: $0.rawValue, name: $0.name, icon: $0.icon)
+            }, currentID: session.inkPreset.rawValue,
+                selected: session.selectedTool == .brush && session.brush.preset != .pencil,
+                activate: { session.selectBrush(session.inkPreset) }, choose: { id in
+                    if let preset = BrushPresetID(rawValue: id) { session.selectBrush(preset) }
+                })
+                .frame(width: 34, height: 34)
+                .background {
+                    Button("选择墨水笔") { session.selectBrush(session.inkPreset) }
+                        .keyboardShortcut("b", modifiers: []).hidden().accessibilityHidden(true)
+                }
+                .help("\(session.inkPreset.name) · 向右滑动选择笔刷")
             toolButton(.eraser, icon: "eraser.fill", name: "橡皮擦")
                 .keyboardShortcut("e", modifiers: [])
             toolButton(.selection, icon: "rectangle.dashed", name: "矩形选区")
@@ -1257,6 +1284,7 @@ private final class FloatingPanelContainer: UIView {
     var colorHost: UIHostingController<AnyView>?
     var brushHost: UIHostingController<AnyView>?
     var pressureHost: UIHostingController<AnyView>?
+    var dynamicsHost: UIHostingController<AnyView>?
     var brushAnchor: CGRect = .zero
 
     override func layoutSubviews() {
@@ -1270,6 +1298,17 @@ private final class FloatingPanelContainer: UIView {
             let y = below + size.height <= bounds.height - 6 ? below :
                 max(6, anchor.minY - size.height - 6)
             brushHost.view.frame = CGRect(origin: CGPoint(x: x, y: y), size: size)
+        }
+        if let dynamicsHost {
+            let size = dynamicsHost.sizeThatFits(in: bounds.size)
+            let anchor = brushHost?.view.frame ?? CGRect(x: bounds.width - 270, y: 40, width: 264, height: 0)
+            let left = anchor.minX - size.width - 5
+            let right = anchor.maxX + 5
+            let x = left >= 4 ? left : right + size.width <= bounds.width - 4 ? right :
+                max(4, min(anchor.minX, bounds.width - size.width - 4))
+            let y = left < 4 && right + size.width > bounds.width - 4 ? anchor.maxY + 5 : anchor.minY
+            dynamicsHost.view.frame = CGRect(x: x, y: max(4, min(y, bounds.height - size.height - 4)),
+                                             width: size.width, height: size.height)
         }
         if let pressureHost {
             let size = pressureHost.sizeThatFits(in: bounds.size)
@@ -1289,19 +1328,19 @@ private final class FloatingPanelContainer: UIView {
     }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        for panel in panelViews.reversed() where panel.frame.contains(point) {
+        for panel in subviews.reversed() where panelViews.contains(where: { $0 === panel }) && panel.frame.contains(point) {
             return panel.hitTest(convert(point, to: panel), with: event) ?? panel
         }
         return nil
     }
 
     private var panelViews: [UIView] {
-        [colorHost?.view, brushHost?.view, pressureHost?.view].compactMap { $0 }
+        [colorHost?.view, brushHost?.view, pressureHost?.view, dynamicsHost?.view].compactMap { $0 }
     }
 }
 
 private struct FloatingPanelOverlay: UIViewRepresentable {
-    @Binding var brush: RoundBrush
+    @Binding var brush: BrushConfiguration
     @Binding var pressureCurve: PressureCurve
     let showsPressure: Bool
     let closePressure: () -> Void
@@ -1310,6 +1349,9 @@ private struct FloatingPanelOverlay: UIViewRepresentable {
     let brushAnchor: CGRect
     let closeColor: () -> Void
     let closeBrush: () -> Void
+    let dynamicsParameter: BrushParameter?
+    let editDynamics: (BrushParameter) -> Void
+    let closeDynamics: () -> Void
 
     func makeUIView(context: Context) -> FloatingPanelContainer {
         let view = FloatingPanelContainer()
@@ -1352,7 +1394,7 @@ private struct FloatingPanelOverlay: UIViewRepresentable {
         }
 
         if showsBrush {
-            let panel = AnyView(BrushSettings(brush: $brush, close: closeBrush).immediateUI())
+            let panel = AnyView(BrushParametersPanel(brush: $brush, editDynamics: editDynamics, close: closeBrush).immediateUI())
             if let host = view.brushHost {
                 host.rootView = panel
             } else {
@@ -1364,6 +1406,20 @@ private struct FloatingPanelOverlay: UIViewRepresentable {
         } else {
             view.brushHost?.view.removeFromSuperview()
             view.brushHost = nil
+        }
+        if let dynamicsParameter {
+            let panel = AnyView(BrushDynamicsPanel(brush: $brush, parameter: dynamicsParameter,
+                close: closeDynamics).id(dynamicsParameter).immediateUI())
+            if let host = view.dynamicsHost { host.rootView = panel }
+            else {
+                let host = UIHostingController(rootView: panel)
+                host.view.backgroundColor = .clear
+                view.addSubview(host.view)
+                view.dynamicsHost = host
+            }
+        } else {
+            view.dynamicsHost?.view.removeFromSuperview()
+            view.dynamicsHost = nil
         }
         view.setNeedsLayout()
     }
@@ -1407,13 +1463,13 @@ private struct ModifierKeyButton: UIViewRepresentable {
 }
 
 private struct ColorEditorPanel: View {
-    @Binding var brush: RoundBrush
+    @Binding var brush: BrushConfiguration
     let close: () -> Void
     @State private var hue: Double
     @State private var saturation: Double
     @State private var brightness: Double
 
-    init(brush: Binding<RoundBrush>, close: @escaping () -> Void) {
+    init(brush: Binding<BrushConfiguration>, close: @escaping () -> Void) {
         self._brush = brush
         self.close = close
         var h: CGFloat = 0
@@ -1521,7 +1577,7 @@ private struct ColorEditorPanel: View {
                     onChange(min(1, max(0, gesture.location.x / geometry.size.width)))
                 })
         }
-        .frame(height: 17)
+        .frame(height: 9)
         .overlay(Rectangle().stroke(Color.black.opacity(0.8), lineWidth: 1))
     }
 
@@ -1538,105 +1594,6 @@ private struct ColorEditorPanel: View {
     }
 }
 
-private struct BrushSettings: View {
-    @Binding var brush: RoundBrush
-    let close: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("圆笔参数").font(.system(size: 12, weight: .semibold))
-                Spacer()
-                Button(action: close) {
-                    Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
-                }
-                .buttonStyle(ImmediateButtonStyle())
-                .accessibilityLabel("关闭画笔参数")
-            }
-            .frame(height: 22)
-            row("不透明度", value: $brush.opacity, range: 0...1)
-            row("间距", value: $brush.spacing, range: 0.05...1)
-            row("大小抖动", value: $brush.sizeJitter, range: 0...1)
-            row("透明度抖动", value: $brush.opacityJitter, range: 0...1)
-            row("位置抖动", value: $brush.positionJitter, range: 0...1)
-            Button {
-                brush.buildsOpacity.toggle()
-            } label: {
-                HStack {
-                    Text("重叠加深")
-                    Spacer()
-                    Image(systemName: brush.buildsOpacity ? "checkmark.square.fill" : "square")
-                        .font(.system(size: 14))
-                }
-                .font(.system(size: 10))
-                .frame(height: 22)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(ImmediateButtonStyle())
-            .help("同一笔画中，重复经过同一区域时是否逐渐加深")
-        }
-        .padding(8)
-        .frame(width: 236)
-        .controlSize(.mini)
-        .background(Color(red: 0.17, green: 0.18, blue: 0.19))
-        .overlay(Rectangle().stroke(Color.gray.opacity(0.7), lineWidth: 1))
-        .shadow(color: .black.opacity(0.6), radius: 8, x: 2, y: 4)
-    }
-
-    private func row(_ title: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
-        HStack(spacing: 6) {
-            Text(title)
-                .font(.system(size: 10))
-                .frame(width: 68, alignment: .leading)
-            FlatSlider(value: value, range: range)
-            Text(value.wrappedValue.formatted(.number.precision(.fractionLength(2))))
-                .font(.system(size: 10, design: .monospaced))
-                .frame(width: 34, alignment: .trailing)
-        }
-        .frame(height: 24)
-    }
-}
-
-private struct FlatSlider: View {
-    @Binding var value: Double
-    let range: ClosedRange<Double>
-
-    var body: some View {
-        GeometryReader { geometry in
-            let width = max(1, geometry.size.width)
-            let fraction = min(1, max(0, (value - range.lowerBound) / (range.upperBound - range.lowerBound)))
-            ZStack(alignment: .leading) {
-                Rectangle()
-                    .fill(Color(red: 0.09, green: 0.10, blue: 0.11))
-                    .frame(height: 8)
-                Rectangle()
-                    .fill(Color(red: 0.39, green: 0.58, blue: 0.77))
-                    .frame(width: width * fraction, height: 8)
-                Rectangle()
-                    .fill(.white)
-                    .frame(width: 3, height: 16)
-                    .offset(x: min(width - 3, max(0, width * fraction - 1.5)))
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
-                let fraction = min(1, max(0, gesture.location.x / width))
-                value = range.lowerBound + fraction * (range.upperBound - range.lowerBound)
-            })
-        }
-        .frame(height: 22)
-        .accessibilityElement()
-        .accessibilityValue(value.formatted(.number.precision(.fractionLength(2))))
-        .accessibilityAdjustableAction { direction in
-            let step = (range.upperBound - range.lowerBound) / 20
-            switch direction {
-            case .increment: value = min(range.upperBound, value + step)
-            case .decrement: value = max(range.lowerBound, value - step)
-            @unknown default: break
-            }
-        }
-    }
-}
 
 private struct ActivitySheet: UIViewControllerRepresentable {
     let items: [Any]

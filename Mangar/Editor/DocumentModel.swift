@@ -311,25 +311,6 @@ extension TileKey {
     }
 }
 
-struct StrokeSample: Codable, Equatable {
-    var x: Double
-    var y: Double
-    var pressure: Double
-}
-
-struct RoundBrush: Codable, Equatable {
-    var size: Double = 12
-    var opacity: Double = 1
-    var spacing: Double = 0.18
-    var sizeJitter: Double = 0
-    var opacityJitter: Double = 0
-    var positionJitter: Double = 0
-    var buildsOpacity: Bool = false
-    var red: Double = 0.08
-    var green: Double = 0.08
-    var blue: Double = 0.09
-}
-
 enum DrawingTool: String, Codable {
     case brush, eraser, selection, lassoSelection, lassoFill
 
@@ -357,7 +338,7 @@ struct SelectionPoint: Codable {
 struct LassoFillCommand: Codable {
     var layerID: UUID
     var points: [SelectionPoint]
-    var brush: RoundBrush
+    var brush: BrushConfiguration
     var target: LayerEditTarget = .content
     var erases: Bool = false
 }
@@ -393,9 +374,11 @@ enum EditorModifier: String, CaseIterable, Hashable {
 }
 
 struct StrokeCommand: Codable {
+    var id: UUID = UUID()
+    var definition: BrushDefinition = MangaBrushes.definition(.gPen)
     var layerID: UUID
     var samples: [StrokeSample]
-    var brush: RoundBrush
+    var brush: BrushConfiguration
     var seed: UInt64
     var tool: DrawingTool
     var target: LayerEditTarget = .content

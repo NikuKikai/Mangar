@@ -34,10 +34,12 @@ final class EditorSession: ObservableObject {
     let renderer: MetalCanvasRenderer
     private let store: ProjectStore
     private var history: CommandHistory
+    private let inkClock = ContinuousInkClock()
+    private var strokeStartTime: TimeInterval = 0
     private var activeStroke: StrokeCommand?
     private var regionTool: DrawingTool?
     private var selectionPath: [SelectionPoint] = []
-    private var regionBrush: RoundBrush?
+    private var regionBrush: BrushConfiguration?
     private var regionErases = false
     private var regionTarget: LayerEditTarget = .content
     private var regionLayerID: UUID?
@@ -58,6 +60,17 @@ final class EditorSession: ObservableObject {
         self.selectedLayerIDs = loaded.page.layers.last.map { [$0.id] } ?? []
         self.history = CommandHistory(checkpoint: DocumentCheckpoint(page: loaded.page,
                                                                       tiles: loaded.tiles))
+    }
+
+    var inkPreset: BrushPresetID {
+        BrushPresetID.inkPresets.contains(brush.preset) ? brush.preset : AppToolPreferences.loadLastInkPreset()
+    }
+
+    func selectBrush(_ preset: BrushPresetID) {
+        endStroke()
+        cancelSelection()
+        brush.select(preset)
+        selectedTool = .brush
     }
 
     var canUndo: Bool { history.canUndo }
@@ -82,40 +95,61 @@ final class EditorSession: ObservableObject {
         manifest.firstPageNumber(for: page.id)
     }
 
-    func beginStroke(at point: CGPoint, pressure: CGFloat) {
+    func beginStroke(at point: CGPoint, pressure: CGFloat, timestamp: TimeInterval,
+                     altitude: CGFloat, azimuth: CGFloat) {
         guard !selectedTool.isRegionTool else { return }
         guard let selectedLayerID, renderer.isInsideCanvas(point),
               page.layers.contains(where: { $0.id == selectedLayerID &&
                   (selectedEditTarget == .mask ? $0.hasMask : $0.kind == .paint) }),
               page.isEffectivelyVisible(selectedLayerID),
               !page.isEffectivelyLocked(selectedLayerID) else { return }
-        activeStroke = StrokeCommand(layerID: selectedLayerID,
-                                     samples: [sample(point, pressure)], brush: editingBrush,
-                                     seed: UInt64.random(in: 1...UInt64.max), tool: usesTransparentColor ? .eraser : selectedTool,
-                                     target: selectedEditTarget)
+        cancelStroke()
+        strokeStartTime = timestamp
+        let configuration = editingBrush.validated
+        let definition = configuration.definition
+        activeStroke = StrokeCommand(definition: definition, layerID: selectedLayerID,
+            samples: [sample(point, pressure, time: 0, altitude: altitude, azimuth: azimuth)],
+            brush: configuration, seed: UInt64.random(in: 1...UInt64.max),
+            tool: usesTransparentColor ? .eraser : selectedTool, target: selectedEditTarget)
+        renderer.preview(activeStroke!)
+        if definition.timeRate > 0 {
+            inkClock.onTick = { [weak self] time in self?.appendContinuousInk(at: time) }
+            inkClock.start()
+        }
+    }
+
+    func appendStroke(at point: CGPoint, pressure: CGFloat, timestamp: TimeInterval,
+                      altitude: CGFloat, azimuth: CGFloat, renderPreview: Bool = true) {
+        guard let last = activeStroke?.samples.last else { return }
+        let x = min(max(0, point.x), CGFloat(page.width - 1))
+        let y = min(max(0, point.y), CGFloat(page.height - 1))
+        let next = sample(CGPoint(x: x, y: y), pressure,
+                          time: max(last.time, timestamp - strokeStartTime), altitude: altitude, azimuth: azimuth)
+        if next == last { return }
+        activeStroke?.samples.append(next)
+        if renderPreview { refreshStrokePreview() }
+    }
+
+    func refreshStrokePreview() {
+        if let stroke = activeStroke { renderer.preview(stroke) }
+    }
+
+    private func appendContinuousInk(at timestamp: TimeInterval) {
+        guard var next = activeStroke?.samples.last else { inkClock.stop(); return }
+        next.time = max(next.time, timestamp - strokeStartTime)
+        activeStroke?.samples.append(next)
         renderer.preview(activeStroke!)
     }
 
-    func appendStroke(at point: CGPoint, pressure: CGFloat) {
-        guard var stroke = activeStroke else { return }
-        let x = min(max(0, point.x), CGFloat(page.width - 1))
-        let y = min(max(0, point.y), CGFloat(page.height - 1))
-        let next = sample(CGPoint(x: x, y: y), pressure)
-        if let last = stroke.samples.last,
-           hypot(next.x - last.x, next.y - last.y) < 0.25 { return }
-        stroke.samples.append(next)
-        activeStroke = stroke
-        renderer.preview(stroke)
-    }
-
     func endStroke() {
+        inkClock.stop()
         guard let stroke = activeStroke else { return }
         activeStroke = nil
-        renderer.clearPreview()
         perform(.stroke(stroke))
     }
 
     func cancelStroke() {
+        inkClock.stop()
         activeStroke = nil
         renderer.clearPreview()
     }
@@ -298,7 +332,7 @@ final class EditorSession: ObservableObject {
         AppToolPreferences.saveColorPresets(colorPresets)
     }
 
-    private var editingBrush: RoundBrush {
+    private var editingBrush: BrushConfiguration {
         var result = brush
         if selectedEditTarget == .mask {
             let gray = min(1, max(0, brush.red * 0.2126 + brush.green * 0.7152 + brush.blue * 0.0722))
@@ -713,9 +747,10 @@ final class EditorSession: ObservableObject {
         pressureCurve.map(Double(pressure))
     }
 
-    private func sample(_ point: CGPoint, _ pressure: CGFloat) -> StrokeSample {
-        StrokeSample(x: Double(point.x), y: Double(point.y),
-                     pressure: mappedPressure(pressure))
+    private func sample(_ point: CGPoint, _ pressure: CGFloat, time: Double,
+                        altitude: CGFloat, azimuth: CGFloat) -> StrokeSample {
+        StrokeSample(x: Double(point.x), y: Double(point.y), pressure: mappedPressure(pressure),
+                     time: time, altitude: Double(altitude), azimuth: Double(azimuth))
     }
 
     private func perform(_ command: EditCommand) {
@@ -806,6 +841,7 @@ final class EditorSession: ObservableObject {
         do {
             if !needsSave && renderer.dirtyTileKeys.isEmpty &&
                 !store.requiresFullSnapshot(page.id) && store.hasThumbnail { return true }
+            renderer.prepareForReadback()
             let allKeys = renderer.tileKeys
             let keys = store.requiresFullSnapshot(page.id) ? allKeys : renderer.dirtyTileKeys
             let changed = renderer.snapshot(keys: keys)

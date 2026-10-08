@@ -38,6 +38,7 @@ final class CanvasSurface: MTKView {
     private var hoverPoint: CGPoint?
     private var contactPoint: CGPoint?
     private var contactPressure: CGFloat = 1
+    private var contactAltitude: CGFloat = .pi / 2
     private var pencilTouch: UITouch?
     private var selectionTouch: UITouch?
     private var pickingTouch: UITouch?
@@ -128,9 +129,10 @@ final class CanvasSurface: MTKView {
            !session.activeModifiers.contains(.option), pickingTouch == nil,
            bounds.contains(position),
            session.renderer.isInsideCanvas(session.renderer.canvasPoint(from: position)) {
-            let tipRadius = contactPoint != nil ?
-                (session.renderer.previewTipRadius ?? max(0.5, CGFloat(session.brush.size) * max(0.05, CGFloat(session.mappedPressure(contactPressure))) / 2)) :
-                max(0.5, CGFloat(session.brush.size) / 2)
+            let pressure = contactPoint != nil ? session.mappedPressure(contactPressure) : 1
+            let fallback = CGFloat(session.brush.radius(pressure: pressure,
+                altitude: contactPoint != nil ? Double(contactAltitude) : .pi / 2))
+            let tipRadius = contactPoint != nil ? (session.renderer.previewTipRadius ?? fallback) : fallback
             radius = tipRadius * session.renderer.zoom
         } else {
             CATransaction.begin()
@@ -158,6 +160,7 @@ final class CanvasSurface: MTKView {
         hoverPoint = nil
         contactPoint = touch.preciseLocation(in: self)
         contactPressure = pressure(for: touch)
+        contactAltitude = touch.altitudeAngle
         refreshBrushCursor()
     }
 
@@ -214,7 +217,9 @@ final class CanvasSurface: MTKView {
             fingerTouches.removeAll()
             transformStart = nil
             let point = session.renderer.canvasPoint(from: pencil.preciseLocation(in: self))
-            session.beginStroke(at: point, pressure: pressure(for: pencil))
+            session.beginStroke(at: point, pressure: pressure(for: pencil),
+                    timestamp: pencil.timestamp, altitude: pencil.altitudeAngle,
+                    azimuth: pencil.azimuthAngle(in: self))
             updateContactCursor(pencil)
             return
         }
@@ -260,8 +265,11 @@ final class CanvasSurface: MTKView {
         if let pencil = pencilTouch, touches.contains(pencil) {
             for sample in event?.coalescedTouches(for: pencil) ?? [pencil] {
                 let point = session.renderer.canvasPoint(from: sample.preciseLocation(in: self))
-                session.appendStroke(at: point, pressure: pressure(for: sample))
+                session.appendStroke(at: point, pressure: pressure(for: sample),
+                    timestamp: sample.timestamp, altitude: sample.altitudeAngle,
+                    azimuth: sample.azimuthAngle(in: self), renderPreview: false)
             }
+            session.refreshStrokePreview()
             updateContactCursor(pencil)
         } else if pencilTouch == nil {
             updateFingerTransform()
@@ -294,7 +302,9 @@ final class CanvasSurface: MTKView {
         }
         if let pencil = pencilTouch, touches.contains(pencil), let session {
             let point = session.renderer.canvasPoint(from: pencil.preciseLocation(in: self))
-            session.appendStroke(at: point, pressure: pressure(for: pencil))
+            session.appendStroke(at: point, pressure: pressure(for: pencil),
+                    timestamp: pencil.timestamp, altitude: pencil.altitudeAngle,
+                    azimuth: pencil.azimuthAngle(in: self))
             session.endStroke()
             pencilTouch = nil
             contactPoint = nil

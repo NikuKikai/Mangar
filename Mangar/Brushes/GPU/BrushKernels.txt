@@ -1,0 +1,203 @@
+// Concatenated with the document shader library. All brush math lives here.
+struct BrushInput { float4 point; float4 orientation; };
+struct BrushDab { float4 geometry; float4 shape; };
+struct BrushState { BrushInput last; float4 phaseDwell; uint4 counters; };
+struct BrushUniforms {
+    float4 settings; // diameter, stroke opacity, flow, spacing
+    float4 dynamics; // tilt elongation
+    float4 surface; // hardness, grain, time rate, maximum pooling
+    float4 jitter; // size, supply, scatter
+    float4 color;
+    uint4 counts; // input count, seed low, seed high, accumulation mode
+    float4 tile; // origin, canvas dimensions
+    uint4 modes; // erase, mask, binary, dab capacity
+    float4 ink; // solid deposition
+};
+
+uint brushHash(uint value) {
+    value ^= value >> 16; value *= 0x7feb352du;
+    value ^= value >> 15; value *= 0x846ca68bu;
+    return value ^ (value >> 16);
+}
+float brushRandom(uint index, uint channel, constant BrushUniforms &u) {
+    return float(brushHash(index ^ brushHash(u.counts.y) ^ brushHash(u.counts.z + channel * 0x9e3779b9u)) & 0xffffffu) / 16777216.0;
+}
+struct BrushCurve { float4 values; float4 tail; float4 tangents; float4 tangentTail; };
+float brushCurve(const device BrushCurve &curve, float input) {
+    if (curve.tail.y == 0.0) return 1.0;
+    float position = clamp(input, 0.0, 1.0) * 4.0;
+    uint i = min(3u, uint(position));
+    float t = position - float(i);
+    float a = curve.values[i], b = i == 3 ? curve.tail.x : curve.values[i+1];
+    float m = curve.tangents[i], n = i == 3 ? curve.tangentTail.x : curve.tangents[i+1];
+    float value = (((2*a - 2*b + m + n)*t + (-3*a + 3*b - 2*m - n))*t + m)*t + a;
+    return clamp(value, min(a,b), max(a,b));
+}
+float brushDynamic(uint parameter, BrushInput p, float speed, const device BrushCurve *curves) {
+    uint offset = parameter * 3;
+    float tilt = 1.0 - sin(clamp(p.orientation.x, 0.0, M_PI_F * 0.5));
+    return brushCurve(curves[offset], p.point.z) *
+           brushCurve(curves[offset+1], speed / (speed + 40.0)) * brushCurve(curves[offset+2], tilt);
+}
+float brushInkSize(float amount) { return sqrt(clamp(amount, 0.0, 1.0)); }
+float brushDiameter(BrushInput p, float speed, constant BrushUniforms &u, const device BrushCurve *curves) {
+    float diameter = u.settings.x * brushDynamic(0, p, speed, curves);
+    if (u.ink.x != 0.0) diameter *= brushInkSize(u.settings.z * brushDynamic(1, p, speed, curves));
+    return diameter;
+}
+BrushInput brushMix(BrushInput a, BrushInput b, float t) {
+    float4 orientation = mix(a.orientation, b.orientation, t);
+    float delta = atan2(sin(b.orientation.y - a.orientation.y), cos(b.orientation.y - a.orientation.y));
+    orientation.y = a.orientation.y + delta * t;
+    return {mix(a.point, b.point, t), orientation};
+}
+void brushEmit(BrushInput p, float dwell, float speed, thread BrushState &state,
+               device BrushDab *dabs, thread uint &count, constant BrushUniforms &u, const device BrushCurve *curves) {
+    // CPU microsegment limits guarantee capacity; never silently truncate input.
+    uint index = state.counters.y++;
+    float radius = max(0.0, u.settings.x * brushDynamic(0, p, speed, curves) * 0.5);
+    radius *= max(0.0, 1.0 + (brushRandom(index, 1, u) * 2.0 - 1.0) * u.jitter.x);
+    radius *= 1.0 + u.surface.w * clamp(dwell / 0.8, 0.0, 1.0);
+    float flow = u.settings.z * brushDynamic(1, p, speed, curves);
+    float opacity = u.settings.y * brushDynamic(2, p, speed, curves);
+    flow *= max(0.0, 1.0 + (brushRandom(index, 2, u) * 2.0 - 1.0) * u.jitter.y);
+    if (u.ink.x != 0.0) {
+        // Ink supply changes the footprint; fully wet ink keeps the selected RGB/opacity.
+        radius *= brushInkSize(flow);
+        flow = flow > 0.0 ? 1.0 : 0.0;
+    }
+    if (radius <= 0.0) flow = 0.0;
+    state.phaseDwell.w = radius;
+    float2 scatter = float2(brushRandom(index, 3, u), brushRandom(index, 4, u)) * 2.0 - 1.0;
+    float aspect = 1.0 + u.dynamics.x * (1.0 - sin(clamp(p.orientation.x, 0.0, M_PI_F * 0.5)));
+    dabs[count++] = {float4(p.point.xy + scatter * u.jitter.z * u.settings.x, radius, clamp(flow, 0.0, 1.0)),
+                    float4(aspect, p.orientation.y, u.surface.y, clamp(opacity, 0.0, 1.0))};
+}
+
+kernel void brushGenerate(const device BrushInput *inputs [[buffer(0)]],
+                          device BrushState &persistent [[buffer(1)]],
+                          device BrushDab *dabs [[buffer(2)]],
+                          device uint &dabCount [[buffer(3)]],
+                          constant BrushUniforms &u [[buffer(4)]],
+                          const device BrushCurve *curves [[buffer(5)]],
+                          uint gid [[thread_position_in_grid]]) {
+    if (gid != 0) return;
+    BrushState state = persistent;
+    uint count = 0;
+    for (uint i = 0; i < u.counts.x; ++i) {
+        BrushInput p = inputs[i];
+        if (state.counters.x == 0) {
+            state.counters.x = 1;
+            state.last = p;
+            brushEmit(p, 0.0, 0.0, state, dabs, count, u, curves);
+            continue;
+        }
+        BrushInput previous = state.last;
+        float distanceAlong = distance(p.point.xy, previous.point.xy);
+        float dt = max(0.0, p.point.w - previous.point.w);
+        float oldSpeed = state.phaseDwell.z;
+        // Time-based smoothing is stable across dispatch batching; ignore zero-duration input.
+        float instantaneous = dt > 0.000001 ? distanceAlong / (dt * max(u.settings.x, 1.0)) : oldSpeed;
+        float speed = mix(oldSpeed, instantaneous, 1.0 - exp(-dt / 0.025));
+        float oldDwell = state.phaseDwell.y;
+        float dwell = distanceAlong < max(0.02, u.settings.x * dt * 0.15) ? oldDwell + dt : 0.0;
+        float diameter = min(brushDiameter(previous, oldSpeed, u, curves), brushDiameter(p, speed, u, curves));
+        float spacing = max(0.125, diameter * u.settings.w);
+        float phaseAdvance = max(distanceAlong / spacing, dt * u.surface.z);
+        float phase = state.phaseDwell.x;
+        float crossing = 1.0 - phase;
+        for (; crossing <= phaseAdvance; crossing += 1.0) {
+            float t = crossing / max(phaseAdvance, 0.000001);
+            brushEmit(brushMix(previous, p, t), mix(oldDwell, dwell, t), mix(oldSpeed, speed, t), state, dabs, count, u, curves);
+        }
+        // A pressure/tilt change must update the contact footprint even without travel.
+        bool tipChanged = abs(p.point.z - previous.point.z) > 0.0001 ||
+            abs(p.orientation.x - previous.orientation.x) > 0.0001 ||
+            abs(sin(p.orientation.y - previous.orientation.y)) > 0.0001;
+        if (phaseAdvance < 0.000001 && tipChanged) {
+            brushEmit(p, dwell, speed, state, dabs, count, u, curves);
+        }
+        state.phaseDwell.x = fract(phase + phaseAdvance);
+        state.phaseDwell.y = dwell;
+        state.phaseDwell.z = speed;
+        state.last = p;
+    }
+    persistent = state;
+    dabCount = count;
+}
+
+// One ordered list per 16x16 subtile. No atomics => stable dab order for replay.
+kernel void brushBin(const device BrushDab *dabs [[buffer(0)]],
+                     const device uint &dabCount [[buffer(1)]],
+                     device uint *indices [[buffer(2)]],
+                     device uint *counts [[buffer(3)]],
+                     constant BrushUniforms &u [[buffer(4)]],
+                     uint gid [[thread_position_in_grid]]) {
+    if (gid >= 256) return;
+    float2 lo = u.tile.xy + float2(gid % 16, gid / 16) * 16.0;
+    float2 hi = lo + 16.0;
+    uint count = 0;
+    for (uint i = 0; i < dabCount; ++i) {
+        BrushDab d = dabs[i];
+        float r = d.geometry.z * d.shape.x + 1.0;
+        if (all(d.geometry.xy + r >= lo) && all(d.geometry.xy - r < hi))
+            indices[gid * u.modes.w + count++] = i;
+    }
+    counts[gid] = count;
+}
+
+kernel void brushRaster(texture2d<float, access::read> base [[texture(0)]],
+                        texture2d<float, access::read> previousCoverage [[texture(1)]],
+                        texture2d<float, access::write> nextCoverage [[texture(2)]],
+                        texture2d<float, access::write> output [[texture(3)]],
+                        texture2d<float, access::read> selection [[texture(4)]],
+                        const device BrushDab *dabs [[buffer(0)]],
+                        const device uint *indices [[buffer(1)]],
+                        const device uint *counts [[buffer(2)]],
+                        constant BrushUniforms &u [[buffer(3)]],
+                        device atomic_uint *bounds [[buffer(4)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= 256 || gid.y >= 256) return;
+    float2 p = u.tile.xy + float2(gid) + 0.5;
+    float coverage = previousCoverage.read(gid).r;
+    uint block = gid.x / 16 + (gid.y / 16) * 16;
+    if (p.x < u.tile.z && p.y < u.tile.w) {
+        for (uint j = 0; j < counts[block]; ++j) {
+            BrushDab d = dabs[indices[block * u.modes.w + j]];
+            float2 v = p - d.geometry.xy;
+            float c = cos(d.shape.y), s = sin(d.shape.y);
+            float2 q = float2(v.x * c + v.y * s, -v.x * s + v.y * c);
+            q.x /= d.shape.x;
+            float r = d.geometry.z;
+            float radial = length(q);
+            float edge = u.modes.z != 0 ? float(radial <= r) : clamp((r - radial) / max(1.0, r * (1.0 - u.surface.x)) + 0.5, 0.0, 1.0);
+            if (d.shape.z > 0.0) {
+                // Canvas-fixed grain does not crawl with sampling cadence or dab jitter.
+                uint h = brushHash(uint(p.x) ^ brushHash(uint(p.y) + 0x51e2a79du));
+                float paper = float(h & 0xffffu) / 65535.0;
+                edge *= mix(1.0, smoothstep(0.12, 0.9, paper), d.shape.z);
+            }
+            float ink = edge * d.geometry.w;
+            float opacity = d.shape.w;
+            if (u.ink.x != 0.0 || u.counts.w == 0) coverage = max(coverage, ink * opacity);
+            else if (u.counts.w == 2) coverage = 1.0 - (1.0 - coverage) * (1.0 - ink * opacity);
+            else coverage = max(coverage, coverage + (opacity - coverage) * ink);
+            coverage = float(half(coverage));
+        }
+    }
+    nextCoverage.write(float4(coverage, 0, 0, 1), gid);
+    float a = coverage * selection.read(gid).r;
+    float4 old = base.read(gid);
+    float4 result;
+    if (u.modes.y != 0) result = float4(mix(old.r, u.modes.x != 0 ? 1.0 : u.color.r, a), 0, 0, 1);
+    else if (u.modes.x != 0) result = old * (1.0 - a);
+    else result = float4(u.color.rgb * a, a) + old * (1.0 - a);
+    output.write(result, gid);
+    bool changed = u.modes.y != 0 ? abs(result.r - old.r) >= (0.5 / 255.0) : any(abs(result - old) >= (0.5 / 255.0));
+    if (changed) {
+        atomic_fetch_min_explicit(&bounds[0], gid.x, memory_order_relaxed);
+        atomic_fetch_min_explicit(&bounds[1], gid.y, memory_order_relaxed);
+        atomic_fetch_max_explicit(&bounds[2], gid.x + 1, memory_order_relaxed);
+        atomic_fetch_max_explicit(&bounds[3], gid.y + 1, memory_order_relaxed);
+    }
+}

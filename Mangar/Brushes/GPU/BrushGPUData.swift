@@ -1,0 +1,39 @@
+import Foundation
+import simd
+
+struct BrushGPUInput {
+    var positionPressureTime: SIMD4<Float>
+    var orientation: SIMD4<Float>
+    init(_ sample: StrokeSample) {
+        positionPressureTime = SIMD4(Float(sample.x), Float(sample.y), Float(sample.pressure), Float(sample.time))
+        orientation = SIMD4(Float(sample.altitude), Float(sample.azimuth), 0, 0)
+    }
+}
+
+/// Layout is shared with BrushKernels.txt; use float4/uint4 to keep ABI explicit.
+struct BrushGPUUniforms {
+    var settings: SIMD4<Float>
+    var dynamics: SIMD4<Float>
+    var surface: SIMD4<Float>
+    var jitter: SIMD4<Float>
+    var color: SIMD4<Float>
+    var counts: SIMD4<UInt32>
+    var tile: SIMD4<Float>
+    var modes: SIMD4<UInt32>
+    var ink: SIMD4<Float>
+
+    init(stroke: StrokeCommand, inputCount: Int, capacity: Int, width: Int, height: Int) {
+        let b = stroke.brush.validated
+        let d = stroke.definition
+        settings = SIMD4(Float(b.size), Float(b.opacity), Float(b.flow), Float(b.spacing))
+        dynamics = SIMD4(Float(d.tip.tiltElongation), 0, 0, 0)
+        surface = SIMD4(Float(d.tip.hardness), Float(d.tip.grain), Float(d.tip.timeRate), Float(d.tip.pooling))
+        jitter = SIMD4(Float(b.sizeJitter), Float(b.opacityJitter), Float(b.positionJitter), 0)
+        color = SIMD4(Float(b.red), Float(b.green), Float(b.blue), 1)
+        counts = SIMD4(UInt32(inputCount), UInt32(truncatingIfNeeded: stroke.seed), UInt32(truncatingIfNeeded: stroke.seed >> 32), b.accumulation.rawValue)
+        tile = SIMD4(0, 0, Float(width), Float(height))
+        ink = SIMD4(Float(d.deposition.rawValue), 0, 0, 0)
+        modes = SIMD4(stroke.tool == .eraser ? 1 : 0, stroke.target == .mask ? 1 : 0,
+                      d.binary ? 1 : 0, UInt32(capacity))
+    }
+}

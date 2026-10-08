@@ -3,19 +3,6 @@ import Metal
 import MetalKit
 import UIKit
 
-private struct GPUDab {
-    var center: SIMD2<Float>
-    var radius: Float
-    var opacity: Float
-}
-
-private struct StampUniforms {
-    var color: SIMD4<Float>
-    var tileOrigin: SIMD2<Float>
-    var dabCount: UInt32
-    var mode: UInt32
-}
-
 private struct QuadUniforms {
     var origin: SIMD2<Float>
     var size: SIMD2<Float>
@@ -33,20 +20,6 @@ private struct LayerCompositeUniforms {
     var tone: SIMD4<Float> = .zero
     var canvasMap: SIMD4<Float> = .zero
     var solidColor: SIMD4<Float> = SIMD4<Float>(repeating: 1)
-}
-
-struct SelectionTileKey: Hashable {
-    var x: Int
-    var y: Int
-}
-
-/// Textures are immutable after publication, so history checkpoints can share them.
-struct SelectionSnapshot {
-    var defaultCoverage: UInt8
-    var tiles: [SelectionTileKey: MTLTexture]
-    var tileBounds: [SelectionTileKey: CGRect]
-    var bounds: CGRect
-    var outlineKeys: Set<SelectionTileKey>
 }
 
 private struct SelectionOpUniforms {
@@ -86,14 +59,12 @@ private final class SelectionDisplayLinkTarget: NSObject {
 final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
     private let queue: MTLCommandQueue
-    private let maskStampPipeline: MTLComputePipelineState
-    private let maskNonAccumulatingPipeline: MTLComputePipelineState
     private let maskFillPipeline: MTLComputePipelineState
     private let maskViewPipeline: MTLRenderPipelineState
     private var maskViewTargets: [Int: MTLTexture] = [:]
     private var maskThumbnailCache: [UUID: UIImage] = [:]
-    private let stampPipeline: MTLComputePipelineState
-    private let nonAccumulatingStampPipeline: MTLComputePipelineState
+    private let brushChanges = BrushChangeTracker()
+    private let brushEngine: MetalBrushEngine
     private let polygonRasterizer: PolygonMaskRasterizer
     private let clearLayerPipeline: MTLComputePipelineState
     private let lassoFillPipeline: MTLComputePipelineState
@@ -115,8 +86,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private let fullMask: MTLTexture
     private var tiles: [TileKey: MTLTexture] = [:]
     private var previewTiles: [TileKey: MTLTexture] = [:]
-    private var previewCoverageTiles: [TileKey: MTLTexture] = [:]
-    private var previewDabCount = 0
+    private var previewStrokeID: UUID?
     private(set) var previewTipRadius: CGFloat?
     private var thumbnailCache: [UUID: UIImage] = [:]
     private var emptyThumbnailLayers: Set<UUID> = []
@@ -148,14 +118,14 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         if !usesRasterOrderGroups {
             shaderSource = shaderSource.replacingOccurrences(of: ", raster_order_group(0)", with: "")
         }
+        guard let brushURL = Bundle.main.url(forResource: "BrushKernels", withExtension: "txt") else {
+            throw RendererError.unavailable
+        }
+        shaderSource += "\n" + (try String(contentsOf: brushURL, encoding: .utf8))
         let library = try device.makeLibrary(source: shaderSource, options: nil)
-        guard let maskStamp = library.makeFunction(name: "stampLayerMask"),
-              let maskNonAccumulating = library.makeFunction(name: "stampLayerMaskNonAccumulating"),
-              let clearLayer = library.makeFunction(name: "clearLayer"),
+        guard let clearLayer = library.makeFunction(name: "clearLayer"),
               let maskFill = library.makeFunction(name: "fillLassoLayerMask"),
               let maskView = library.makeFunction(name: "maskValueFragment"),
-              let stamp = library.makeFunction(name: "stampRound"),
-              let nonAccumulatingStamp = library.makeFunction(name: "stampRoundNonAccumulating"),
               let lassoFill = library.makeFunction(name: "fillLasso"),
               let lassoLineVertex = library.makeFunction(name: "lassoLineVertex"),
               let lassoLineFragment = library.makeFunction(name: "lassoLineFragment"),
@@ -176,8 +146,6 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         self.device = device
         self.usesRasterOrderGroups = usesRasterOrderGroups
         self.queue = queue
-        self.maskStampPipeline = try device.makeComputePipelineState(function: maskStamp)
-        self.maskNonAccumulatingPipeline = try device.makeComputePipelineState(function: maskNonAccumulating)
         self.clearLayerPipeline = try device.makeComputePipelineState(function: clearLayer)
         self.maskFillPipeline = try device.makeComputePipelineState(function: maskFill)
         let maskDescriptor = MTLRenderPipelineDescriptor()
@@ -185,8 +153,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         maskDescriptor.fragmentFunction = maskView
         maskDescriptor.colorAttachments[0].pixelFormat = .r8Unorm
         self.maskViewPipeline = try device.makeRenderPipelineState(descriptor: maskDescriptor)
-        self.stampPipeline = try device.makeComputePipelineState(function: stamp)
-        self.nonAccumulatingStampPipeline = try device.makeComputePipelineState(function: nonAccumulatingStamp)
+        self.brushEngine = try MetalBrushEngine(device: device, queue: queue, library: library)
         self.polygonRasterizer = try PolygonMaskRasterizer(device: device, queue: queue, library: library)
         self.lassoFillPipeline = try device.makeComputePipelineState(function: lassoFill)
         self.selectionEditPipeline = try device.makeComputePipelineState(function: selectionEdit)
@@ -244,6 +211,11 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         self.lassoLinePipeline = try device.makeRenderPipelineState(descriptor: lineDescriptor)
         self.page = page
         super.init()
+        brushEngine.onTipRadius = { [weak self] id, radius in
+            guard let self, self.previewStrokeID == id else { return }
+            self.previewTipRadius = radius
+            (self.view as? CanvasSurface)?.refreshBrushCursor()
+        }
     }
 
     deinit { displayLink?.invalidate() }
@@ -330,73 +302,63 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func clearPreview() {
+        brushEngine.cancel()
+        previewStrokeID = nil
         previewTipRadius = nil
         previewTiles.removeAll()
-        previewCoverageTiles.removeAll()
-        previewDabCount = 0
         view?.setNeedsDisplay()
     }
 
     func preview(_ stroke: StrokeCommand) {
-        let allDabs = makeDabs(stroke)
-        previewTipRadius = allDabs.last.map { CGFloat($0.radius) }
-        if allDabs.count < previewDabCount {
-            previewTiles.removeAll()
-            previewCoverageTiles.removeAll()
-            previewDabCount = 0
+        let result = brushEngine.update(stroke, base: tiles, selection: selection, width: page.width, height: page.height)
+        previewTiles = result.tiles
+        if previewStrokeID != stroke.id, let last = stroke.samples.last {
+            previewTipRadius = CGFloat(stroke.brush.radius(pressure: last.pressure, altitude: last.altitude))
         }
-        guard allDabs.count > previewDabCount else { return }
-        var updated = previewTiles
-        var coverage = previewCoverageTiles
-        stamp(Array(allDabs.dropFirst(previewDabCount)), brush: stroke.brush,
-              layerID: stroke.layerID, mode: stroke.tool, target: stroke.target, into: &updated,
-              coverage: &coverage, copyingCommitted: true)
-        previewTiles = updated
-        previewCoverageTiles = coverage
-        previewDabCount = allDabs.count
+        previewStrokeID = stroke.id
         view?.setNeedsDisplay()
     }
 
     func commit(_ stroke: StrokeCommand) {
+        let result = brushEngine.finish(stroke, base: tiles, selection: selection, width: page.width, height: page.height)
+        brushChanges.record(result, tiles: tiles, dirty: dirtyBounds)
+        for (key, texture) in result.tiles { tiles[key] = texture }
+        for (key, bounds) in result.dirtyBounds {
+            dirtyBounds[key] = (dirtyBounds[key] ?? .null).union(bounds)
+        }
+        previewStrokeID = nil
         previewTipRadius = nil
+        previewTiles.removeAll()
         maskThumbnailCache.removeValue(forKey: stroke.layerID)
         thumbnailCache.removeValue(forKey: stroke.layerID)
         emptyThumbnailLayers.remove(stroke.layerID)
-        previewTiles.removeAll()
-        previewCoverageTiles.removeAll()
-        previewDabCount = 0
-        var updated = tiles
-        var coverage: [TileKey: MTLTexture] = [:]
-        stamp(makeDabs(stroke), brush: stroke.brush, layerID: stroke.layerID,
-              mode: stroke.tool, target: stroke.target, into: &updated,
-              coverage: &coverage, copyingCommitted: false)
-        tiles = updated
         view?.setNeedsDisplay()
     }
 
     func removeTiles(for layerID: UUID) {
+        brushChanges.invalidate(layerID: layerID)
         maskThumbnailCache.removeValue(forKey: layerID)
         thumbnailCache.removeValue(forKey: layerID)
         emptyThumbnailLayers.remove(layerID)
         tiles = tiles.filter { $0.key.layerID != layerID }
         previewTiles = previewTiles.filter { $0.key.layerID != layerID }
-        previewCoverageTiles = previewCoverageTiles.filter { $0.key.layerID != layerID }
         dirtyBounds = dirtyBounds.filter { $0.key.layerID != layerID }
         view?.setNeedsDisplay()
     }
 
     func removeTiles(for layerID: UUID, target: LayerEditTarget) {
+        brushChanges.invalidate(layerID: layerID)
         thumbnailCache.removeValue(forKey: layerID)
         emptyThumbnailLayers.remove(layerID)
         maskThumbnailCache.removeValue(forKey: layerID)
         tiles = tiles.filter { $0.key.layerID != layerID || $0.key.target != target }
         previewTiles = previewTiles.filter { $0.key.layerID != layerID || $0.key.target != target }
-        previewCoverageTiles = previewCoverageTiles.filter { $0.key.layerID != layerID || $0.key.target != target }
         dirtyBounds = dirtyBounds.filter { $0.key.layerID != layerID || $0.key.target != target }
         view?.setNeedsDisplay()
     }
 
     func snapshot() -> [TileKey: Data] {
+        prepareForReadback()
         var result: [TileKey: Data] = [:]
         for (key, texture) in tiles {
             result[key] = bytes(of: texture)
@@ -408,6 +370,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     var dirtyTileKeys: Set<TileKey> { Set(dirtyBounds.keys) }
 
     func snapshot(keys: Set<TileKey>) -> [TileKey: Data] {
+        prepareForReadback()
         var result: [TileKey: Data] = [:]
         for key in keys {
             if let texture = tiles[key] { result[key] = bytes(of: texture) }
@@ -415,21 +378,28 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         return result
     }
 
-    func clearSavedDirtyTiles() { dirtyBounds.removeAll() }
+    func prepareForReadback() {
+        brushEngine.synchronize()
+        brushChanges.resolve(tiles: &tiles, dirty: &dirtyBounds)
+    }
+
+    func clearSavedDirtyTiles() { dirtyBounds.removeAll(); brushChanges.invalidate() }
 
     func markAllTilesDirty() {
+        brushChanges.invalidate()
         for key in tiles.keys { dirtyBounds[key] = .infinite }
     }
 
     func restore(_ snapshot: [TileKey: Data]) {
+        brushEngine.cancel()
+        brushChanges.invalidate()
+        previewStrokeID = nil
         previewTipRadius = nil
         thumbnailCache.removeAll()
         maskThumbnailCache.removeAll()
         emptyThumbnailLayers.removeAll()
         tiles.removeAll()
         previewTiles.removeAll()
-        previewCoverageTiles.removeAll()
-        previewDabCount = 0
         dirtyBounds.removeAll()
         selection = nil
         selectionPreviewRect = nil
@@ -574,10 +544,6 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                             bytesPerRow: CanvasConstants.tileSize * 4)
         }
         return texture
-    }
-
-    private func newCoverageTile() -> MTLTexture {
-        Self.makeMaskTile(device: device, fill: 0)
     }
 
     private static func makeMaskTile(device: MTLDevice, fill: UInt8) -> MTLTexture {
@@ -781,6 +747,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func commitClear(_ clear: ClearLayerCommand) {
+        brushChanges.invalidate(layerID: clear.layerID)
         // Missing content tiles are transparent; missing mask tiles are white.
         // Clearing the whole target can therefore release its sparse allocation.
         guard let selection else {
@@ -829,6 +796,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func commitLassoFill(_ fill: LassoFillCommand) {
+        brushChanges.invalidate(layerID: fill.layerID)
         let masks = polygonMasks(fill.points)
         guard !masks.isEmpty, let command = queue.makeCommandBuffer() else { return }
         let size = CanvasConstants.tileSize
@@ -873,155 +841,6 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         thumbnailCache.removeValue(forKey: fill.layerID)
         emptyThumbnailLayers.remove(fill.layerID)
         view?.setNeedsDisplay()
-    }
-
-    private func stamp(_ dabs: [GPUDab], brush: RoundBrush, layerID: UUID, mode: DrawingTool, target: LayerEditTarget,
-                       into destination: inout [TileKey: MTLTexture],
-                       coverage: inout [TileKey: MTLTexture],
-                       copyingCommitted: Bool) {
-        guard !dabs.isEmpty, let commandBuffer = queue.makeCommandBuffer() else { return }
-        let size = CanvasConstants.tileSize
-        let radius = dabs.map(\.radius).max() ?? 0
-        var minX = max(0, Int(floor(Double(dabs.map(\.center.x).min()! - radius) / Double(size))))
-        var minY = max(0, Int(floor(Double(dabs.map(\.center.y).min()! - radius) / Double(size))))
-        var maxX = min((page.width - 1) / size,
-                       Int(floor(Double(dabs.map(\.center.x).max()! + radius) / Double(size))))
-        var maxY = min((page.height - 1) / size,
-                       Int(floor(Double(dabs.map(\.center.y).max()! + radius) / Double(size))))
-        if let selection, selection.defaultCoverage == 0 {
-            guard !selection.bounds.isNull else { return }
-            minX = max(minX, Int(floor(selection.bounds.minX / CGFloat(size))))
-            minY = max(minY, Int(floor(selection.bounds.minY / CGFloat(size))))
-            maxX = min(maxX, Int(ceil(selection.bounds.maxX / CGFloat(size))) - 1)
-            maxY = min(maxY, Int(ceil(selection.bounds.maxY / CGFloat(size))) - 1)
-        }
-        guard minX <= maxX, minY <= maxY else { return }
-        for ty in minY...maxY {
-            for tx in minX...maxX {
-                let key = TileKey(layerID: layerID, x: tx, y: ty, target: target)
-                let maskKey = SelectionTileKey(x: tx, y: ty)
-                if let selection, selection.tileBounds[maskKey] == nil,
-                   (selection.defaultCoverage == 0 || selection.tiles[maskKey] != nil) {
-                    continue
-                }
-                let mask = selection?.tiles[maskKey] ??
-                    (selection?.defaultCoverage == 0 ? emptyMask : fullMask)
-                let origin = SIMD2<Float>(Float(tx * size), Float(ty * size))
-                let localDabs = dabs.filter {
-                    $0.center.x + $0.radius >= origin.x &&
-                    $0.center.y + $0.radius >= origin.y &&
-                    $0.center.x - $0.radius < origin.x + Float(size) &&
-                    $0.center.y - $0.radius < origin.y + Float(size)
-                }
-                guard !localDabs.isEmpty else { continue }
-                guard let dabBuffer = device.makeBuffer(bytes: localDabs,
-                                                        length: localDabs.count * MemoryLayout<GPUDab>.stride) else {
-                    continue
-                }
-                let source = brush.buildsOpacity
-                    ? (destination[key] ?? (copyingCommitted ? tiles[key] : nil) ?? newTile(target: target))
-                    : (tiles[key] ?? newTile(target: target))
-                let output = newTile(target: target)
-                var uniforms = StampUniforms(
-                    color: SIMD4<Float>(Float(brush.red), Float(brush.green),
-                                        Float(brush.blue), 1),
-                    tileOrigin: origin, dabCount: UInt32(localDabs.count),
-                    mode: mode == .eraser ? 1 : 0)
-                guard let encoder = commandBuffer.makeComputeCommandEncoder() else { continue }
-                if brush.buildsOpacity {
-                    encoder.setComputePipelineState(target == .mask ? maskStampPipeline : stampPipeline)
-                    encoder.setTexture(source, index: 0)
-                    encoder.setTexture(output, index: 1)
-                    encoder.setTexture(mask, index: 2)
-                } else {
-                    let previousCoverage = coverage[key] ?? newCoverageTile()
-                    let nextCoverage = newCoverageTile()
-                    encoder.setComputePipelineState(target == .mask ? maskNonAccumulatingPipeline : nonAccumulatingStampPipeline)
-                    encoder.setTexture(source, index: 0)
-                    encoder.setTexture(previousCoverage, index: 1)
-                    encoder.setTexture(output, index: 2)
-                    encoder.setTexture(nextCoverage, index: 3)
-                    encoder.setTexture(mask, index: 4)
-                    coverage[key] = nextCoverage
-                }
-                encoder.setBuffer(dabBuffer, offset: 0, index: 0)
-                encoder.setBytes(&uniforms, length: MemoryLayout<StampUniforms>.stride, index: 1)
-                encoder.dispatchThreads(MTLSize(width: size, height: size, depth: 1),
-                                        threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
-                encoder.endEncoding()
-                destination[key] = output
-                if !copyingCommitted {
-                    let tileRect = CGRect(x: tx * size, y: ty * size, width: size, height: size)
-                    let strokeRect = CGRect(x: CGFloat(dabs.map(\.center.x).min()! - radius),
-                                            y: CGFloat(dabs.map(\.center.y).min()! - radius),
-                                            width: CGFloat(dabs.map(\.center.x).max()! - dabs.map(\.center.x).min()! + radius * 2),
-                                            height: CGFloat(dabs.map(\.center.y).max()! - dabs.map(\.center.y).min()! + radius * 2))
-                    var changed = tileRect.intersection(strokeRect)
-                    if let selection, selection.defaultCoverage == 0,
-                       let selectedBounds = selection.tileBounds[maskKey] {
-                        changed = changed.intersection(selectedBounds)
-                    }
-                    if !changed.isNull {
-                        dirtyBounds[key] = (dirtyBounds[key] ?? .null).union(changed)
-                    }
-                }
-            }
-        }
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-    }
-
-    private func makeDabs(_ stroke: StrokeCommand) -> [GPUDab] {
-        guard let first = stroke.samples.first else { return [] }
-        var state = stroke.seed == 0 ? 1 : stroke.seed
-        func random() -> Float {
-            state ^= state << 13
-            state ^= state >> 7
-            state ^= state << 17
-            return Float(state & 0x00ff_ffff) / Float(0x0100_0000)
-        }
-        func dab(_ point: StrokeSample) -> GPUDab {
-            let brush = stroke.brush
-            let sizeFactor = 1 + (Double(random()) * 2 - 1) * brush.sizeJitter
-            let opacityFactor = 1 + (Double(random()) * 2 - 1) * brush.opacityJitter
-            let jitterX = (Double(random()) * 2 - 1) * brush.positionJitter * brush.size
-            let jitterY = (Double(random()) * 2 - 1) * brush.positionJitter * brush.size
-            return GPUDab(center: SIMD2<Float>(Float(point.x + jitterX), Float(point.y + jitterY)),
-                          radius: Float(max(0.5, brush.size * max(0.05, point.pressure) * sizeFactor / 2)),
-                          opacity: Float(min(1, max(0, brush.opacity * opacityFactor))))
-        }
-        var result = [dab(first)]
-        var distanceSinceDab = 0.0
-        var previous = first
-        for current in stroke.samples.dropFirst() {
-            let dx = current.x - previous.x
-            let dy = current.y - previous.y
-            let length = hypot(dx, dy)
-            if length > 0 {
-                // Use the smaller pressure-adjusted diameter across this input segment.
-                // A shrinking tip can otherwise leave visible gaps before the next sample.
-                let segmentDiameter = max(1, stroke.brush.size *
-                    max(0.05, min(previous.pressure, current.pressure)))
-                var along = 0.0
-                while along < length {
-                    let lastDiameter = Double(result.last!.radius) * 2
-                    let step = max(0.5, stroke.brush.spacing * min(lastDiameter, segmentDiameter))
-                    let advance = max(0, step - distanceSinceDab)
-                    if along + advance > length {
-                        distanceSinceDab += length - along
-                        break
-                    }
-                    along += advance
-                    let t = along / length
-                    result.append(dab(StrokeSample(x: previous.x + dx * t,
-                                                   y: previous.y + dy * t,
-                                                   pressure: previous.pressure + (current.pressure - previous.pressure) * t)))
-                    distanceSinceDab = 0
-                }
-            }
-            previous = current
-        }
-        return result
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {

@@ -1,74 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
 
-struct Dab {
-    float2 center;
-    float radius;
-    float opacity;
-};
-
-struct StampUniforms {
-    float4 color;
-    float2 tileOrigin;
-    uint dabCount;
-    uint mode;
-};
-
-kernel void stampRound(texture2d<float, access::read> source [[texture(0)]],
-                       texture2d<float, access::write> output [[texture(1)]],
-                       texture2d<float, access::read> selection [[texture(2)]],
-                       constant Dab *dabs [[buffer(0)]],
-                       constant StampUniforms &u [[buffer(1)]],
-                       uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= source.get_width() || gid.y >= source.get_height()) return;
-    float2 p = u.tileOrigin + float2(gid) + 0.5;
-    float accumulated = 0.0;
-    float mask = selection.read(gid).r;
-    for (uint i = 0; i < u.dabCount; ++i) {
-        float coverage = clamp(dabs[i].radius + 0.5 - distance(p, dabs[i].center), 0.0, 1.0);
-        float a = coverage * dabs[i].opacity * mask;
-        accumulated = 1.0 - (1.0 - accumulated) * (1.0 - a);
-    }
-    float4 old = source.read(gid);
-    if (accumulated <= 0.0) {
-        output.write(old, gid);
-        return;
-    }
-    if (u.mode == 1) {
-        output.write(old * (1.0 - accumulated), gid);
-        return;
-    }
-    float4 ink = float4(u.color.rgb * accumulated, accumulated);
-    output.write(ink + old * (1.0 - accumulated), gid);
-}
-
-kernel void stampRoundNonAccumulating(texture2d<float, access::read> base [[texture(0)]],
-                                      texture2d<float, access::read> priorCoverage [[texture(1)]],
-                                      texture2d<float, access::write> output [[texture(2)]],
-                                      texture2d<float, access::write> nextCoverage [[texture(3)]],
-                                      texture2d<float, access::read> selection [[texture(4)]],
-                                      constant Dab *dabs [[buffer(0)]],
-                                      constant StampUniforms &u [[buffer(1)]],
-                                      uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= base.get_width() || gid.y >= base.get_height()) return;
-    float2 p = u.tileOrigin + float2(gid) + 0.5;
-    float coverage = priorCoverage.read(gid).r;
-    for (uint i = 0; i < u.dabCount; ++i) {
-        float edge = clamp(dabs[i].radius + 0.5 - distance(p, dabs[i].center), 0.0, 1.0);
-        coverage = max(coverage, edge * dabs[i].opacity);
-    }
-    coverage = round(clamp(coverage, 0.0, 1.0) * 255.0) / 255.0;
-    nextCoverage.write(float4(coverage, 0.0, 0.0, 1.0), gid);
-    coverage *= selection.read(gid).r;
-    float4 old = base.read(gid);
-    if (u.mode == 1) {
-        output.write(old * (1.0 - coverage), gid);
-    } else {
-        float4 ink = float4(u.color.rgb * coverage, coverage);
-        output.write(ink + old * (1.0 - coverage), gid);
-    }
-}
-
 struct SelectionOpUniforms {
     float4 rect;
     float2 tileOrigin;
@@ -398,53 +330,6 @@ vertex LassoLineOutput lassoLineVertex(uint id [[vertex_id]],
 fragment float4 lassoLineFragment(LassoLineOutput in [[stage_in]], constant float &phase [[buffer(0)]]) {
     float stripe = fmod(floor((in.position.x + in.position.y) / 5.0 + phase), 2.0);
     return float4(float3(stripe < 1.0 ? 0.0 : 1.0), 1);
-}
-
-kernel void stampLayerMask(texture2d<float, access::read> source [[texture(0)]],
-                       texture2d<float, access::write> output [[texture(1)]],
-                       texture2d<float, access::read> selection [[texture(2)]],
-                       constant Dab *dabs [[buffer(0)]],
-                       constant StampUniforms &u [[buffer(1)]],
-                       uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= source.get_width() || gid.y >= source.get_height()) return;
-    float2 p = u.tileOrigin + float2(gid) + 0.5;
-    float accumulated = 0.0;
-    float mask = selection.read(gid).r;
-    for (uint i = 0; i < u.dabCount; ++i) {
-        float coverage = clamp(dabs[i].radius + 0.5 - distance(p, dabs[i].center), 0.0, 1.0);
-        float a = coverage * dabs[i].opacity * mask;
-        accumulated = 1.0 - (1.0 - accumulated) * (1.0 - a);
-    }
-    float old = source.read(gid).r;
-    if (accumulated <= 0.0) {
-        output.write(float4(old, 0, 0, 1), gid);
-        return;
-    }
-    float gray = u.mode == 1 ? 1.0 : u.color.r;
-    output.write(float4(mix(old, gray, accumulated), 0, 0, 1), gid);
-}
-
-kernel void stampLayerMaskNonAccumulating(texture2d<float, access::read> base [[texture(0)]],
-                                      texture2d<float, access::read> priorCoverage [[texture(1)]],
-                                      texture2d<float, access::write> output [[texture(2)]],
-                                      texture2d<float, access::write> nextCoverage [[texture(3)]],
-                                      texture2d<float, access::read> selection [[texture(4)]],
-                                      constant Dab *dabs [[buffer(0)]],
-                                      constant StampUniforms &u [[buffer(1)]],
-                                      uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= base.get_width() || gid.y >= base.get_height()) return;
-    float2 p = u.tileOrigin + float2(gid) + 0.5;
-    float coverage = priorCoverage.read(gid).r;
-    for (uint i = 0; i < u.dabCount; ++i) {
-        float edge = clamp(dabs[i].radius + 0.5 - distance(p, dabs[i].center), 0.0, 1.0);
-        coverage = max(coverage, edge * dabs[i].opacity);
-    }
-    coverage = round(clamp(coverage, 0.0, 1.0) * 255.0) / 255.0;
-    nextCoverage.write(float4(coverage, 0.0, 0.0, 1.0), gid);
-    coverage *= selection.read(gid).r;
-    float old = base.read(gid).r;
-    float gray = u.mode == 1 ? 1.0 : u.color.r;
-    output.write(float4(mix(old, gray, coverage), 0, 0, 1), gid);
 }
 
 kernel void fillLassoLayerMask(texture2d<float, access::read> base [[texture(0)]],

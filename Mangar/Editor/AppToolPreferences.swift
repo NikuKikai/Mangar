@@ -5,19 +5,40 @@ enum AppToolPreferences {
     private static let pressureCurveKey = "Mangar.tools.pressureCurve.v1"
     private static let presetKey = "Mangar.tools.colorPresets.v1"
     private static let transparentKey = "Mangar.tools.transparentColor.v1"
-    private static let brushKey = "Mangar.tools.roundBrush.v1"
+    private static let brushKey = "Mangar.tools.brushLibrary.v3"
+    private static let lastInkKey = "Mangar.tools.lastInkPreset.v1"
+    private static let previousBrushKey = "Mangar.tools.brush.v2"
 
-    static func loadBrush(from defaults: UserDefaults = .standard) -> RoundBrush {
-        guard let data = defaults.data(forKey: brushKey),
-              let brush = try? JSONDecoder().decode(RoundBrush.self, from: data) else {
-            return RoundBrush()
+    private static func loadBrushLibrary(from defaults: UserDefaults) -> BrushPresetLibrary {
+        if let data = defaults.data(forKey: brushKey),
+           let library = try? JSONDecoder().decode(BrushPresetLibrary.self, from: data), library.color.isValid {
+            return library
         }
-        return brush
+        var library = BrushPresetLibrary()
+        if let data = defaults.data(forKey: previousBrushKey),
+           let brush = try? JSONDecoder().decode(BrushConfiguration.self, from: data) {
+            library.store(brush)
+        }
+        return library
     }
 
-    static func saveBrush(_ brush: RoundBrush, to defaults: UserDefaults = .standard) {
-        guard let data = try? JSONEncoder().encode(brush) else { return }
+    static func loadBrush(preset: BrushPresetID? = nil, from defaults: UserDefaults = .standard) -> BrushConfiguration {
+        loadBrushLibrary(from: defaults).configuration(for: preset)
+    }
+
+    static func loadLastInkPreset(from defaults: UserDefaults = .standard) -> BrushPresetID {
+        if let value = defaults.string(forKey: lastInkKey), let preset = BrushPresetID(rawValue: value),
+           BrushPresetID.inkPresets.contains(preset) { return preset }
+        let current = loadBrush(from: defaults).preset
+        return BrushPresetID.inkPresets.contains(current) ? current : .gPen
+    }
+
+    static func saveBrush(_ brush: BrushConfiguration, to defaults: UserDefaults = .standard) {
+        var library = loadBrushLibrary(from: defaults)
+        library.store(brush)
+        guard let data = try? JSONEncoder().encode(library) else { return }
         defaults.set(data, forKey: brushKey)
+        if BrushPresetID.inkPresets.contains(brush.preset) { defaults.set(brush.preset.rawValue, forKey: lastInkKey) }
     }
     static func loadPressureCurve(from defaults: UserDefaults = .standard) -> PressureCurve {
         guard let data = defaults.data(forKey: pressureCurveKey),
@@ -68,7 +89,7 @@ struct AppColor: Codable, Equatable {
     init(red: Double, green: Double, blue: Double, opacity: Double) {
         self.red = red; self.green = green; self.blue = blue; self.opacity = opacity
     }
-    init(_ brush: RoundBrush) {
+    init(_ brush: BrushConfiguration) {
         self.init(red: brush.red, green: brush.green, blue: brush.blue, opacity: brush.opacity)
     }
     var isValid: Bool { [red, green, blue, opacity].allSatisfy { $0.isFinite && (0...1).contains($0) } }

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct BrushDynamicsPanel: View {
     @Binding var brush: BrushConfiguration
+    let brushName: String
     let parameter: BrushParameter
     let close: () -> Void
     @State private var input: BrushDynamicInput = .pressure
@@ -13,7 +14,7 @@ struct BrushDynamicsPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 3) {
-                Text("\(brush.preset.name) · \(parameter.name)动态").font(.system(size: 11, weight: .semibold))
+                Text("\(brushName) · \(parameter.name)动态").font(.system(size: 11, weight: .semibold))
                 Spacer(minLength: 2)
                 Button(action: close) { Image(systemName: "xmark").font(.system(size: 10)).frame(width: 18, height: 18) }
                     .accessibilityLabel("关闭动态曲线面板")

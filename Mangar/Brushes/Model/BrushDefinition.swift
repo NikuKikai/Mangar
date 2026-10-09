@@ -1,12 +1,20 @@
 import Foundation
 
-enum BrushDeposition: UInt32, Codable {
+enum BrushDeposition: UInt32, Codable, CaseIterable {
     case pigment, solidInk
+    var name: String { self == .pigment ? "颜料" : "墨水" }
+}
+
+/// User-editable rendering behavior; preset identity is only a source of defaults.
+struct BrushRenderingSettings: Codable, Equatable {
+    var deposition: BrushDeposition = .pigment
+    var binary: Bool = false
+    var accumulation: BrushAccumulation = .flat
 }
 
 /// Frozen execution identity and tip settings; all scalar input dynamics live in BrushDynamics.
 struct BrushDefinition: Codable, Equatable {
-    var version: Int = 4
+    var version: Int = 6
     var preset: BrushPresetID
     var tip: BrushTipSettings = BrushTipSettings()
     var binary: Bool = false
@@ -21,6 +29,7 @@ struct BrushDefinition: Codable, Equatable {
     /// Conservative scheduling only. Curves may enlarge size above its base value.
     func maximumReach(_ brush: BrushConfiguration) -> Double {
         brush.size * 0.5 * brush.resolvedDynamics.size.maximum * (1 + brush.sizeJitter) *
-            (1 + tip.tiltElongation) * (1 + tip.pooling) + brush.size * brush.positionJitter * 1.414214 + 2
+            (1 + tip.tiltElongation) * (1 + tip.pooling) * max(1, brush.stampSettings.aspect) *
+            (brush.stampSettings.assetIDs.isEmpty ? 1 : 1.414214) + brush.size * brush.positionJitter * 1.414214 + 2
     }
 }

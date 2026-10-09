@@ -32,6 +32,7 @@ final class MetalBrushEngine {
         var measuredBounds: [TileKey: MTLBuffer]
     }
 
+    private let tipCache = BrushTipTextureCache()
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let generate: MTLComputePipelineState
@@ -61,7 +62,7 @@ final class MetalBrushEngine {
         generate = try pipeline("brushGenerate")
         bin = try pipeline("brushBin")
         raster = try pipeline("brushRaster")
-        dabBuffer = device.makeBuffer(length: Self.dabCapacity * 32, options: .storageModePrivate)!
+        dabBuffer = device.makeBuffer(length: Self.dabCapacity * 48, options: .storageModePrivate)!
         dabCountBuffer = device.makeBuffer(length: 4, options: .storageModePrivate)!
         indexBuffer = device.makeBuffer(length: 256 * Self.dabCapacity * 4, options: .storageModePrivate)!
         subtileCountBuffer = device.makeBuffer(length: 256 * 4, options: .storageModePrivate)!
@@ -83,7 +84,7 @@ final class MetalBrushEngine {
             let state = device.makeBuffer(length: 64, options: .storageModeShared)!
             memset(state.contents(), 0, state.length)
             transaction = Transaction(id: stroke.id, state: state, selection: selection,
-                compiled: CompiledBrush(device: device, stroke: stroke, capacity: Self.dabCapacity, width: width, height: height))
+                compiled: CompiledBrush(device: device, queue: queue, cache: tipCache, stroke: stroke, capacity: Self.dabCapacity, width: width, height: height))
         }
         let context = transaction!
         guard context.processed < stroke.samples.count else { return result(context) }
@@ -180,6 +181,7 @@ final class MetalBrushEngine {
                     encoder.setTexture(tile.coverage, index: 1)
                     encoder.setTexture(tile.spareCoverage, index: 2)
                     encoder.setTexture(tile.output, index: 3)
+                    encoder.setTexture(context.compiled.tips, index: 5)
                     encoder.setTexture(context.selection?.tiles[selectionKey] ??
                         (context.selection?.defaultCoverage == 0 ? emptySelection : fullSelection), index: 4)
                     encoder.setBuffer(dabs, offset: 0, index: 0)

@@ -112,14 +112,18 @@ final class SlideSelectToolView: UIControl, UIGestureRecognizerDelegate {
 
     private func open() {
         guard panel == nil, let window, !items.isEmpty else { return }
-        let popup = UIView()
+        let popup = UIScrollView()
+        popup.bounces = false
+        popup.showsVerticalScrollIndicator = true
         popup.backgroundColor = UIColor(white: 0.12, alpha: 1)
         popup.layer.borderColor = UIColor.white.withAlphaComponent(0.25).cgColor
         popup.layer.borderWidth = 1
         let anchor = convert(bounds, to: window)
         let safe = window.bounds.inset(by: window.safeAreaInsets).insetBy(dx: 4, dy: 4)
         let width: CGFloat = min(142, safe.width)
-        let height = CGFloat(items.count) * 30 + 6
+        let contentHeight = CGFloat(items.count) * 30 + 6
+        let height = min(contentHeight, safe.height)
+        popup.contentSize = CGSize(width: width, height: contentHeight)
         let current = CGFloat(items.firstIndex { $0.id == currentID } ?? 0)
         popup.frame = CGRect(x: max(safe.minX, min(anchor.maxX + 4, safe.maxX - width)),
             y: max(safe.minY, min(anchor.midY - 18 - current * 30, safe.maxY - height)), width: width, height: height)
@@ -145,6 +149,7 @@ final class SlideSelectToolView: UIControl, UIGestureRecognizerDelegate {
             popup.addSubview(row)
             return row
         }
+        popup.contentOffset.y = min(max(0, current * 30 - height / 2 + 18), contentHeight - height)
         panel = popup; popupWindow = window
         window.addSubview(popup)
         let outside = UITapGestureRecognizer(target: self, action: #selector(close))
@@ -155,6 +160,11 @@ final class SlideSelectToolView: UIControl, UIGestureRecognizerDelegate {
     }
     private func updateHover(_ touch: UITouch) {
         guard let panel else { return }
+        if let scroll = panel as? UIScrollView, scroll.contentSize.height > scroll.bounds.height {
+            let visibleY = touch.location(in: scroll).y - scroll.contentOffset.y
+            let delta: CGFloat = visibleY < 14 ? -8 : visibleY > scroll.bounds.height - 14 ? 8 : 0
+            scroll.contentOffset.y = max(0, min(scroll.contentSize.height - scroll.bounds.height, scroll.contentOffset.y + delta))
+        }
         let point = touch.location(in: panel)
         hoveredID = rows.first { $0.frame.contains(point) }.map { items[$0.tag].id }
     }

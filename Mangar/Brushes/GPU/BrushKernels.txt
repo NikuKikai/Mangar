@@ -1,6 +1,6 @@
 // Concatenated with the document shader library. All brush math lives here.
 struct BrushInput { float4 point; float4 orientation; };
-struct BrushDab { float4 geometry; float4 shape; };
+struct BrushDab { float4 geometry; float4 shape; uint4 resource; };
 struct BrushState { BrushInput last; float4 phaseDwell; uint4 counters; };
 struct BrushUniforms {
     float4 settings; // diameter, stroke opacity, flow, spacing
@@ -12,6 +12,8 @@ struct BrushUniforms {
     float4 tile; // origin, canvas dimensions
     uint4 modes; // erase, mask, binary, dab capacity
     float4 ink; // solid deposition
+    float4 stamp; // aspect, angle offset, rotation mode
+    uint4 images; // image count, selection mode
 };
 
 uint brushHash(uint value) {
@@ -69,9 +71,11 @@ void brushEmit(BrushInput p, float dwell, float speed, thread BrushState &state,
     if (radius <= 0.0) flow = 0.0;
     state.phaseDwell.w = radius;
     float2 scatter = float2(brushRandom(index, 3, u), brushRandom(index, 4, u)) * 2.0 - 1.0;
-    float aspect = 1.0 + u.dynamics.x * (1.0 - sin(clamp(p.orientation.x, 0.0, M_PI_F * 0.5)));
+    float aspect = u.stamp.x * (1.0 + u.dynamics.x * (1.0 - sin(clamp(p.orientation.x, 0.0, M_PI_F * 0.5))));
+    float angle = u.stamp.y + (u.stamp.z == 2.0 ? p.orientation.y : u.stamp.z == 1.0 ? as_type<float>(state.counters.w) : 0.0);
+    uint image = u.images.x == 0 ? 0 : u.images.y == 0 ? index % u.images.x : min(u.images.x - 1, uint(brushRandom(index, 5, u) * float(u.images.x)));
     dabs[count++] = {float4(p.point.xy + scatter * u.jitter.z * u.settings.x, radius, clamp(flow, 0.0, 1.0)),
-                    float4(aspect, p.orientation.y, u.surface.y, clamp(opacity, 0.0, 1.0))};
+                    float4(aspect, angle, u.surface.y, clamp(opacity, 0.0, 1.0)), uint4(image, 0, 0, 0)};
 }
 
 kernel void brushGenerate(const device BrushInput *inputs [[buffer(0)]],
@@ -95,6 +99,7 @@ kernel void brushGenerate(const device BrushInput *inputs [[buffer(0)]],
         BrushInput previous = state.last;
         float distanceAlong = distance(p.point.xy, previous.point.xy);
         float dt = max(0.0, p.point.w - previous.point.w);
+        if (distanceAlong > 0.00001) state.counters.w = as_type<uint>(atan2(p.point.y - previous.point.y, p.point.x - previous.point.x));
         float oldSpeed = state.phaseDwell.z;
         // Time-based smoothing is stable across dispatch batching; ignore zero-duration input.
         float instantaneous = dt > 0.000001 ? distanceAlong / (dt * max(u.settings.x, 1.0)) : oldSpeed;
@@ -139,7 +144,7 @@ kernel void brushBin(const device BrushDab *dabs [[buffer(0)]],
     uint count = 0;
     for (uint i = 0; i < dabCount; ++i) {
         BrushDab d = dabs[i];
-        float r = d.geometry.z * d.shape.x + 1.0;
+        float r = d.geometry.z * (u.images.x > 0 ? length(float2(d.shape.x, 1.0)) : max(1.0, d.shape.x)) + 1.0;
         if (all(d.geometry.xy + r >= lo) && all(d.geometry.xy - r < hi))
             indices[gid * u.modes.w + count++] = i;
     }
@@ -151,6 +156,7 @@ kernel void brushRaster(texture2d<float, access::read> base [[texture(0)]],
                         texture2d<float, access::write> nextCoverage [[texture(2)]],
                         texture2d<float, access::write> output [[texture(3)]],
                         texture2d<float, access::read> selection [[texture(4)]],
+                        texture2d_array<float, access::sample> tips [[texture(5)]],
                         const device BrushDab *dabs [[buffer(0)]],
                         const device uint *indices [[buffer(1)]],
                         const device uint *counts [[buffer(2)]],
@@ -171,6 +177,13 @@ kernel void brushRaster(texture2d<float, access::read> base [[texture(0)]],
             float r = d.geometry.z;
             float radial = length(q);
             float edge = u.modes.z != 0 ? float(radial <= r) : clamp((r - radial) / max(1.0, r * (1.0 - u.surface.x)) + 0.5, 0.0, 1.0);
+            if (u.images.x > 0) {
+                constexpr sampler tipSampler(coord::normalized, address::clamp_to_zero, filter::linear, mip_filter::linear);
+                float2 uv = q / max(2.0 * r, 0.00001) + 0.5;
+                float lod = max(0.0, log2(float(tips.get_width() - 2) / max(1.0, 2.0 * r * min(1.0, d.shape.x))));
+                edge = all(uv >= 0.0) && all(uv <= 1.0) && r > 0.0 ? tips.sample(tipSampler, (uv * float(tips.get_width() - 2) + 1.0) / float(tips.get_width()), d.resource.x, level(lod)).r : 0.0;
+                if (u.modes.z != 0) edge = edge > 0.5 ? 1.0 : 0.0;
+            }
             if (d.shape.z > 0.0) {
                 // Canvas-fixed grain does not crawl with sampling cadence or dab jitter.
                 uint h = brushHash(uint(p.x) ^ brushHash(uint(p.y) + 0x51e2a79du));
@@ -179,7 +192,7 @@ kernel void brushRaster(texture2d<float, access::read> base [[texture(0)]],
             }
             float ink = edge * d.geometry.w;
             float opacity = d.shape.w;
-            if (u.ink.x != 0.0 || u.counts.w == 0) coverage = max(coverage, ink * opacity);
+            if (u.counts.w == 0) coverage = max(coverage, ink * opacity);
             else if (u.counts.w == 2) coverage = 1.0 - (1.0 - coverage) * (1.0 - ink * opacity);
             else coverage = max(coverage, coverage + (opacity - coverage) * ink);
             coverage = float(half(coverage));

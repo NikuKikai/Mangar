@@ -20,7 +20,9 @@ struct CompiledBrush {
     var uniforms: BrushGPUUniforms
     let curves: MTLBuffer
     let maximumReach: Double
-    init(device: MTLDevice, stroke: StrokeCommand, capacity: Int, width: Int, height: Int) {
+    let tips: MTLTexture
+    init(device: MTLDevice, queue: MTLCommandQueue, cache: BrushTipTextureCache, stroke: StrokeCommand, capacity: Int, width: Int, height: Int) {
+        tips = cache.texture(assets: stroke.tipAssets ?? [], device: device, queue: queue)
         uniforms = BrushGPUUniforms(stroke: stroke, inputCount: 0, capacity: capacity, width: width, height: height)
         let settings = stroke.brush.validated
         let dynamics = settings.resolvedDynamics

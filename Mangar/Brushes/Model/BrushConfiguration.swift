@@ -1,7 +1,8 @@
 import Foundation
 
 enum BrushPresetID: String, Codable, CaseIterable {
-    case pencil, gPen, technicalPen, binaryPen
+    case pencil, gPen, technicalPen, binaryPen, oilFlat
+    static let oilPresets: [Self] = [.oilFlat]
     static let inkPresets: [Self] = [.gPen, .technicalPen, .binaryPen]
     var icon: String {
         switch self {
@@ -9,6 +10,7 @@ enum BrushPresetID: String, Codable, CaseIterable {
         case .gPen: "fountainpen.tip"
         case .technicalPen: "pencil.tip"
         case .binaryPen: "square.fill"
+        case .oilFlat: "paintbrush.fill"
         }
     }
     var name: String {
@@ -17,6 +19,7 @@ enum BrushPresetID: String, Codable, CaseIterable {
         case .gPen: "G 笔"
         case .technicalPen: "针管笔"
         case .binaryPen: "二值笔"
+        case .oilFlat: "平头油画笔"
         }
     }
 }
@@ -48,6 +51,24 @@ struct BrushConfiguration: Codable, Equatable {
     // Missing fields in existing app settings resolve to each preset's established behavior.
     var dynamics: BrushDynamics? = nil
     var tip: BrushTipSettings? = nil
+    var rendering: BrushRenderingSettings? = nil
+    var resourceID: UUID? = nil
+    var stamp: BrushStampSettings? = nil
+    var stampSettings: BrushStampSettings {
+        get { (stamp ?? MangaBrushes.stamp(preset)).validated }
+        set { stamp = newValue.validated }
+    }
+
+    var renderingSettings: BrushRenderingSettings {
+        get {
+            if let rendering { return rendering }
+            let defaults = MangaBrushes.definition(preset)
+            // Preserve the effective behavior of settings saved before rendering was editable.
+            return BrushRenderingSettings(deposition: defaults.deposition, binary: defaults.binary,
+                                          accumulation: defaults.isSolidInk ? .flat : accumulation)
+        }
+        set { rendering = newValue }
+    }
 
     var resolvedDynamics: BrushDynamics {
         get { (dynamics ?? MangaBrushes.dynamics(preset)).validated }
@@ -60,6 +81,8 @@ struct BrushConfiguration: Codable, Equatable {
     var definition: BrushDefinition {
         var value = MangaBrushes.definition(preset)
         value.tip = tipSettings
+        value.deposition = renderingSettings.deposition
+        value.binary = renderingSettings.binary
         return value
     }
     func radius(pressure: Double, altitude: Double = .pi / 2, speed: Double = 0) -> Double {
@@ -86,11 +109,12 @@ struct BrushConfiguration: Codable, Equatable {
         result.blue = clamp(blue, 0...1, 0)
         result.dynamics = dynamics?.validated
         result.tip = tip?.validated
+        result.stamp = stamp?.validated
         return result
     }
 
     mutating func select(_ preset: BrushPresetID, from defaults: UserDefaults = .standard) {
-        guard preset != self.preset else { return }
+        guard preset != self.preset || resourceID != nil else { return }
         // Store before switching too, so callers need not depend on a UI observer's timing.
         AppToolPreferences.saveBrush(self, to: defaults)
         self = AppToolPreferences.loadBrush(preset: preset, from: defaults)

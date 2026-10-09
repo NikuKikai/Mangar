@@ -21,6 +21,8 @@ struct BrushGPUUniforms {
     var tile: SIMD4<Float>
     var modes: SIMD4<UInt32>
     var ink: SIMD4<Float>
+    var stamp: SIMD4<Float>
+    var images: SIMD4<UInt32>
 
     init(stroke: StrokeCommand, inputCount: Int, capacity: Int, width: Int, height: Int) {
         let b = stroke.brush.validated
@@ -30,8 +32,11 @@ struct BrushGPUUniforms {
         surface = SIMD4(Float(d.tip.hardness), Float(d.tip.grain), Float(d.tip.timeRate), Float(d.tip.pooling))
         jitter = SIMD4(Float(b.sizeJitter), Float(b.opacityJitter), Float(b.positionJitter), 0)
         color = SIMD4(Float(b.red), Float(b.green), Float(b.blue), 1)
-        counts = SIMD4(UInt32(inputCount), UInt32(truncatingIfNeeded: stroke.seed), UInt32(truncatingIfNeeded: stroke.seed >> 32), b.accumulation.rawValue)
+        counts = SIMD4(UInt32(inputCount), UInt32(truncatingIfNeeded: stroke.seed), UInt32(truncatingIfNeeded: stroke.seed >> 32), b.renderingSettings.accumulation.rawValue)
         tile = SIMD4(0, 0, Float(width), Float(height))
+        let tip = b.stampSettings
+        stamp = SIMD4(Float(tip.aspect), Float(tip.angle * .pi / 180), Float(tip.rotation.rawValue), 0)
+        images = SIMD4(UInt32(stroke.tipAssets?.count ?? 0), tip.sequence.rawValue, 0, 0)
         ink = SIMD4(Float(d.deposition.rawValue), 0, 0, 0)
         modes = SIMD4(stroke.tool == .eraser ? 1 : 0, stroke.target == .mask ? 1 : 0,
                       d.binary ? 1 : 0, UInt32(capacity))

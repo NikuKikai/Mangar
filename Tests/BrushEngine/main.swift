@@ -1,11 +1,14 @@
 import Foundation
 import CoreGraphics
 import Metal
+import ImageIO
+import UniformTypeIdentifiers
 
 @main
 struct BrushEngineChecks {
     @MainActor static func main() async throws {
         let root = URL(fileURLWithPath: CommandLine.arguments[1])
+        BundledBrushTips.resourceDirectory = root.appendingPathComponent("Mangar/Brushes/Presets/Assets")
         let device = MTLCreateSystemDefaultDevice()!
         let queue = device.makeCommandQueue()!
         let source = try String(contentsOf: root.appendingPathComponent("Mangar/Rendering/BrushShaderSource.txt"), encoding: .utf8) + "\n" +
@@ -16,7 +19,8 @@ struct BrushEngineChecks {
         func command(_ preset: BrushPresetID, _ samples: [StrokeSample], size: Double = 24) -> StrokeCommand {
             var brush = MangaBrushes.configuration(preset)
             brush.size = size; brush.red = 0; brush.green = 0; brush.blue = 0
-            return StrokeCommand(definition: MangaBrushes.definition(preset), layerID: layer,
+            let assets = try! BrushResourceStore.shared.assets(for: brush)
+            return StrokeCommand(tipAssets: assets, definition: MangaBrushes.definition(preset), layerID: layer,
                                  samples: samples, brush: brush, seed: 123456789, tool: .brush)
         }
         func dot(_ preset: BrushPresetID, pressure: Double = 1, time: Double = 0, altitude: Double = .pi/2) -> StrokeCommand {
@@ -47,7 +51,7 @@ struct BrushEngineChecks {
             precondition(condition(), "FAILED: \(name)")
             FileHandle.standardOutput.write(Data("PASS \(name)\n".utf8))
         }
-        check(MemoryLayout<BrushGPUInput>.stride == 32 && MemoryLayout<BrushGPUUniforms>.stride == 144, "Metal ABI")
+        check(MemoryLayout<BrushGPUInput>.stride == 32 && MemoryLayout<BrushGPUUniforms>.stride == 176, "Metal ABI")
         let lowG = area(paint(dot(.gPen, pressure: 0.15)))
         let highG = area(paint(dot(.gPen)))
         check(highG > lowG * 8, "G pen pressure width")
@@ -265,6 +269,138 @@ struct BrushEngineChecks {
         }
         engine.cancel()
         check(abs(observedRadius - 6) < 0.01, "Async cursor readback reports actual ink footprint")
+        // Identical explicit settings must render identically regardless of preset identity.
+        var custom = dot(.gPen, time: 0.2)
+        custom.brush.stampSettings = BrushStampSettings()
+        custom.brush.resolvedDynamics = BrushDynamics()
+        custom.brush.tipSettings = BrushTipSettings(hardness: 0.6, grain: 0.2, timeRate: 60)
+        custom.brush.opacity = 0.3; custom.brush.flow = 0.4
+        for deposition in BrushDeposition.allCases {
+            for binary in [false, true] {
+                for mode in BrushAccumulation.allCases {
+                    custom.brush.renderingSettings = BrushRenderingSettings(deposition: deposition, binary: binary, accumulation: mode)
+                    custom.definition = custom.brush.definition
+                    let expected = image(paint(custom))
+                    for preset in BrushPresetID.allCases {
+                        var other = custom
+                        other.brush.preset = preset; other.definition = other.brush.definition
+                        check(image(paint(other)) == expected, "Explicit rendering settings ignore preset identity: \(preset)/\(deposition)/\(binary)/\(mode)")
+                    }
+                }
+            }
+        }
+        custom.brush.tipSettings = BrushTipSettings(timeRate: 60)
+        custom.brush.flow = 1
+        custom.brush.renderingSettings = BrushRenderingSettings(deposition: .solidInk, accumulation: .flat)
+        custom.definition = custom.brush.definition
+        let flatInk = alpha(paint(custom)).max()!
+        custom.brush.renderingSettings.accumulation = .flow
+        let flowInk = alpha(paint(custom)).max()!
+        custom.brush.renderingSettings.accumulation = .buildUp
+        let buildInk = alpha(paint(custom)).max()!
+        check(flatInk <= 77 && flowInk <= 77 && buildInk > 77, "Ink accumulation is editable and respects explicit opacity semantics")
+        let solidTip = try BrushTipAsset(width: 16, height: 16, coverage: Data(repeating: 255, count: 256))
+        let faintTip = try BrushTipAsset(width: 16, height: 16, coverage: Data(repeating: 64, count: 256))
+        let halfTip = try BrushTipAsset(width: 16, height: 16,
+            coverage: Data((0..<256).map { $0 < 128 ? UInt8(255) : UInt8(0) }))
+        func stamp(_ assets: [BrushTipAsset]) -> StrokeCommand {
+            var value = dot(.gPen)
+            value.brush.size = 64; value.brush.flow = 1; value.brush.opacity = 1
+            value.brush.resolvedDynamics = BrushDynamics(); value.brush.tipSettings = BrushTipSettings()
+            value.brush.renderingSettings = BrushRenderingSettings(deposition: .pigment)
+            value.brush.stampSettings = BrushStampSettings(assetIDs: assets.map(\.id), rotation: .fixed)
+            value.definition = value.brush.definition; value.tipAssets = assets
+            return value
+        }
+        let square = stamp([solidTip])
+        let squarePixels = alpha(paint(square))
+        check(squarePixels[154*256+154] > 240, "Image tip covers square corners outside a procedural circle")
+        var skinny = square; skinny.brush.stampSettings.aspect = 0.5
+        let skinnyPixels = alpha(paint(skinny))
+        check((0..<256).filter { skinnyPixels[128*256+$0] > 127 }.count == 32, "Image aspect controls footprint width")
+        skinny.brush.stampSettings.angle = 90
+        let rotatedPixels = alpha(paint(skinny))
+        check((0..<256).filter { rotatedPixels[128*256+$0] > 127 }.count == 64, "Fixed image angle rotates footprint")
+        let halfPixels = alpha(paint(stamp([halfTip])))
+        check(halfPixels[112*256+128] > 240 && halfPixels[144*256+128] == 0, "Image tip preserves source row orientation")
+        var direction = square
+        direction.brush.stampSettings.aspect = 0.25; direction.brush.stampSettings.rotation = .direction
+        direction.samples = [StrokeSample(x: 128, y: 80, pressure: 1), StrokeSample(x: 128, y: 128, pressure: 1, time: 0.5)]
+        let directionalPixels = alpha(paint(direction))
+        check((0..<256).filter { directionalPixels[128*256+$0] > 127 }.count > 55, "Image tip follows vertical travel direction")
+        var ordered = stamp([solidTip, faintTip])
+        ordered.brush.size = 24; ordered.brush.spacing = 1
+        ordered.samples = [StrokeSample(x: 128, y: 128, pressure: 1), StrokeSample(x: 224, y: 128, pressure: 1, time: 0.4)]
+        let sequencePixels = alpha(paint(ordered))
+        check(sequencePixels[128*256+128] == 255 && sequencePixels[128*256+152] == 64 &&
+              sequencePixels[128*256+176] == 255, "Multiple image tips alternate in order")
+        for mode in BrushTipSequence.allCases {
+            ordered.brush.stampSettings.sequence = mode
+            ordered.samples = (0...40).map { StrokeSample(x: 220 + Double($0)*4, y: 180 + sin(Double($0)/4)*30,
+                pressure: 1, time: Double($0)*0.01) }
+            let expected = image(paint(ordered))
+            var split = ordered; split.id = UUID(); split.samples = []
+            for sample in ordered.samples {
+                split.samples.append(sample)
+                _ = engine.update(split, base: [:], selection: nil, width: 600, height: 600)
+            }
+            check(image(paint(split)) == expected, "Image selection and direction replay deterministically: \(mode)")
+            check(expected.keys.contains { $0.x == 1 }, "Image tip crosses tile boundaries")
+        }
+        var corner = square
+        corner.brush.stampSettings.angle = 45
+        corner.samples = [StrokeSample(x: 215, y: 128, pressure: 1)]
+        check(image(paint(corner)).keys.contains { $0.x == 1 }, "Rotated square corners schedule neighboring tile")
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("Mangar-resource-check-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let resourceStore = BrushResourceStore(root: scratch)
+        try resourceStore.store(solidTip); try resourceStore.store(solidTip)
+        let tipFiles = try FileManager.default.contentsOfDirectory(atPath: scratch.appendingPathComponent("tips").path)
+        check(tipFiles.count == 1,
+              "Tip assets deduplicate by immutable content hash")
+        var resourceConfig = square.brush
+        let originalRevision = BrushRecipe(resourceConfig).revision
+        let resource = try resourceStore.create(name: "Test", configuration: resourceConfig)
+        resourceConfig = try resourceStore.configuration(resource, color: resourceConfig)
+        try resourceStore.rename(resource.id, name: "Renamed")
+        resourceConfig.size = 80
+        try resourceStore.update(resourceConfig)
+        let reloaded = BrushResourceStore(root: scratch)
+        let listed = try reloaded.resources()
+        check(listed[0].id == resource.id && listed[0].name == "Renamed" && listed[0].revision != originalRevision,
+              "Brush rename preserves ID; edits publish a new revision")
+        let oldRecipe = try reloaded.configuration(resource, color: resourceConfig)
+        check(oldRecipe.size == 64,
+              "Old recipe revision remains immutable")
+        let loadedTips = try reloaded.assets(for: resourceConfig)
+        check(loadedTips == [solidTip], "Raw R8 tip assets reload with integrity validation")
+        let savedSnapshot = try JSONEncoder().encode(square)
+        resourceConfig.stampSettings.assetIDs = []
+        try reloaded.update(resourceConfig)
+        let frozen = try JSONDecoder().decode(StrokeCommand.self, from: savedSnapshot)
+        check(image(paint(frozen)) == image(paint(square)), "Frozen history survives resource edits")
+        let reset = try reloaded.reset(resource.id, color: resourceConfig)
+        check(reset.size == 64 && reset.stampSettings.assetIDs == [solidTip.id], "Reset restores copied recipe and tip references")
+        resourceConfig.red = 0.8
+        check(BrushRecipe(resourceConfig).revision == BrushRecipe({ var b = resourceConfig; b.red = 0; return b }()).revision,
+              "Resource recipe revision excludes current color")
+        let imageURL = scratch.appendingPathComponent("import.png")
+        let rgba: [UInt8] = [0,0,0,255, 255,255,255,255, 0,0,0,128, 0,0,0,0]
+        let imageProvider = CGDataProvider(data: Data(rgba) as CFData)!
+        let importImage = CGImage(width: 2, height: 2, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 8,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: imageProvider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        let destination = CGImageDestinationCreateWithURL(imageURL as CFURL, UTType.png.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, importImage, nil)
+        check(CGImageDestinationFinalize(destination), "PNG import fixture writes")
+        let importedAlpha = try BrushTipImporter.load(imageURL, channel: .alpha)
+        let importedDarkness = try BrushTipImporter.load(imageURL, channel: .darkness)
+        check(Array(importedAlpha.coverage) == [255,255,128,0], "Alpha image import preserves orientation and coverage")
+        check(Array(importedDarkness.coverage) == [255,0,128,0], "Black grayscale image import combines luminance with alpha")
+        let tipURL = scratch.appendingPathComponent("tips/" + solidTip.id + ".tip")
+        try Data([1,2,3]).write(to: tipURL)
+        do { _ = try BrushResourceStore(root: scratch).assets(for: reset); check(false, "Corrupt tip must fail") }
+        catch { print("PASS Corrupt tip is rejected") }
         let suiteName = "Mangar.BrushEngineChecks.\(UUID().uuidString)"
         let suite = UserDefaults(suiteName: suiteName)!
         defer { suite.removePersistentDomain(forName: suiteName) }
@@ -275,6 +411,7 @@ struct BrushEngineChecks {
         configuration.resolvedDynamics.opacity.speed = BrushResponseCurve(enabled: true, outputs: [0.2,0.8,1,0.4,0.1])
         configuration.tipSettings.hardness = 0.3
         configuration.tipSettings.pooling = 0.75
+        configuration.renderingSettings = BrushRenderingSettings(deposition: .solidInk, binary: true, accumulation: .buildUp)
         AppToolPreferences.saveBrush(configuration, to: suite)
         let savedPencil = configuration
         configuration.select(.gPen, from: suite)
@@ -312,6 +449,34 @@ struct BrushEngineChecks {
         configuration = AppToolPreferences.loadBrush(from: suite)
         check(configuration.preset == .pencil && AppToolPreferences.loadLastInkPreset(from: suite) == .technicalPen,
               "Tool group selection survives reload")
+        let builtinBeforeCustom = AppToolPreferences.loadBrush(preset: .gPen, from: suite)
+        var customConfig = savedG
+        customConfig.resourceID = resource.id
+        customConfig.stampSettings.assetIDs = [solidTip.id]
+        customConfig.size = 33
+        AppToolPreferences.saveBrush(customConfig, to: suite)
+        check(AppToolPreferences.loadBrush(from: suite) == customConfig, "Custom resource selection and stamp settings persist")
+        check(AppToolPreferences.loadBrush(preset: .gPen, from: suite) == builtinBeforeCustom,
+              "Custom resource edits never overwrite its source preset")
+        customConfig.select(.pencil, from: suite)
+        check(customConfig.resourceID == nil && AppToolPreferences.loadLastBrushResource(from: suite) == resource.id,
+              "Pencil selection retains remembered custom tool group resource")
+        customConfig.select(.gPen, from: suite)
+        check(AppToolPreferences.loadLastBrushResource(from: suite) == nil, "Selecting built-in ink replaces remembered custom resource")
+        var oil = MangaBrushes.configuration(.oilFlat)
+        let bundled = try BrushResourceStore.shared.assets(for: oil)
+        check(bundled.count == 1 && bundled[0].id == BundledBrushTips.oilFlatID &&
+            bundled[0].coverage.contains(0) && bundled[0].coverage.contains(where: { $0 > 200 }),
+            "Oil preset resolves the bundled bristle tip with transparent gaps")
+        check(area(paint(dot(.oilFlat))) > area(paint(dot(.oilFlat, pressure: 0.2))) * 2,
+              "Oil preset has visible pressure size response")
+        oil.size = 113; oil.flow = 0.43; oil.stampSettings.angle = 18
+        AppToolPreferences.saveBrush(oil, to: suite)
+        oil.select(.gPen, from: suite)
+        oil.select(.oilFlat, from: suite)
+        check(oil.size == 113 && oil.flow == 0.43 && oil.stampSettings.angle == 18 &&
+              oil.stampSettings.assetIDs == [BundledBrushTips.oilFlatID], "Oil tool keeps independent parameters and bundled tip across switching")
+        check(AppToolPreferences.loadLastInkPreset(from: suite) == .gPen, "Oil tool does not replace remembered ink tool")
         print("All GPU brush checks passed")
     }
 }

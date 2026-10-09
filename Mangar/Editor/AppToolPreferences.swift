@@ -6,6 +6,7 @@ enum AppToolPreferences {
     private static let presetKey = "Mangar.tools.colorPresets.v1"
     private static let transparentKey = "Mangar.tools.transparentColor.v1"
     private static let brushKey = "Mangar.tools.brushLibrary.v3"
+    private static let lastResourceKey = "Mangar.tools.lastBrushResource.v1"
     private static let lastInkKey = "Mangar.tools.lastInkPreset.v1"
     private static let previousBrushKey = "Mangar.tools.brush.v2"
 
@@ -33,12 +34,20 @@ enum AppToolPreferences {
         return BrushPresetID.inkPresets.contains(current) ? current : .gPen
     }
 
+    static func loadLastBrushResource(from defaults: UserDefaults = .standard) -> UUID? {
+        defaults.string(forKey: lastResourceKey).flatMap(UUID.init(uuidString:))
+    }
+
     static func saveBrush(_ brush: BrushConfiguration, to defaults: UserDefaults = .standard) {
         var library = loadBrushLibrary(from: defaults)
         library.store(brush)
         guard let data = try? JSONEncoder().encode(library) else { return }
         defaults.set(data, forKey: brushKey)
-        if BrushPresetID.inkPresets.contains(brush.preset) { defaults.set(brush.preset.rawValue, forKey: lastInkKey) }
+        if let id = brush.resourceID { defaults.set(id.uuidString, forKey: lastResourceKey) }
+        else if BrushPresetID.inkPresets.contains(brush.preset) {
+            defaults.set(brush.preset.rawValue, forKey: lastInkKey)
+            defaults.removeObject(forKey: lastResourceKey)
+        }
     }
     static func loadPressureCurve(from defaults: UserDefaults = .standard) -> PressureCurve {
         guard let data = defaults.data(forKey: pressureCurveKey),

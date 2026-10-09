@@ -10,9 +10,14 @@ final class EditorSession: ObservableObject {
     @Published private(set) var selectedEditTarget: LayerEditTarget = .content
     @Published var brush = AppToolPreferences.loadBrush() {
         didSet {
-            if brush != oldValue { AppToolPreferences.saveBrush(brush) }
+            if brush != oldValue {
+                AppToolPreferences.saveBrush(brush)
+                scheduleBrushResourceSave()
+            }
         }
     }
+    @Published private(set) var brushResources: [BrushResource] = []
+    private var resourceSaveTask: Task<Void, Never>?
     @Published var pressureCurve = AppToolPreferences.loadPressureCurve() {
         didSet {
             if pressureCurve != oldValue { AppToolPreferences.savePressureCurve(pressureCurve) }
@@ -60,17 +65,116 @@ final class EditorSession: ObservableObject {
         self.selectedLayerIDs = loaded.page.layers.last.map { [$0.id] } ?? []
         self.history = CommandHistory(checkpoint: DocumentCheckpoint(page: loaded.page,
                                                                       tiles: loaded.tiles))
+        do {
+            try BrushResourceStore.shared.update(brush)
+            brushResources = try BrushResourceStore.shared.resources()
+        } catch { message = error.localizedDescription }
     }
 
     var inkPreset: BrushPresetID {
         BrushPresetID.inkPresets.contains(brush.preset) ? brush.preset : AppToolPreferences.loadLastInkPreset()
     }
 
+    var inkBrushID: String {
+        if let id = brush.resourceID { return id.uuidString }
+        if !BrushPresetID.inkPresets.contains(brush.preset), let id = AppToolPreferences.loadLastBrushResource(),
+           brushResources.contains(where: { $0.id == id }) { return id.uuidString }
+        return inkPreset.rawValue
+    }
+    func activateInkBrush() {
+        if let id = UUID(uuidString: inkBrushID), let resource = brushResources.first(where: { $0.id == id }) {
+            if brush.resourceID == id { endStroke(); cancelSelection(); selectedTool = .brush }
+            else { selectBrushResource(resource) }
+        } else { selectBrush(inkPreset) }
+    }
+
     func selectBrush(_ preset: BrushPresetID) {
         endStroke()
         cancelSelection()
+        flushBrushResource()
         brush.select(preset)
         selectedTool = .brush
+    }
+
+    var brushName: String {
+        brushResources.first(where: { $0.id == brush.resourceID })?.name ?? brush.preset.name
+    }
+    private func scheduleBrushResourceSave() {
+        resourceSaveTask?.cancel()
+        guard brush.resourceID != nil else { return }
+        let configuration = brush
+        resourceSaveTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 350_000_000)
+                guard let self else { return }
+                try BrushResourceStore.shared.update(configuration)
+                self.brushResources = try BrushResourceStore.shared.resources()
+            } catch is CancellationError { } catch { self?.message = error.localizedDescription }
+        }
+    }
+    func flushBrushResource() {
+        resourceSaveTask?.cancel()
+        do {
+            try BrushResourceStore.shared.update(brush)
+            brushResources = try BrushResourceStore.shared.resources()
+        } catch { message = error.localizedDescription }
+    }
+    func selectBrushResource(_ resource: BrushResource) {
+        endStroke(); cancelSelection(); flushBrushResource()
+        do {
+            let current = try BrushResourceStore.shared.resources().first { $0.id == resource.id }
+            guard let current else { throw BrushResourceError.invalidResource }
+            let configuration = try BrushResourceStore.shared.configuration(current, color: brush)
+            _ = try BrushResourceStore.shared.assets(for: configuration)
+            brush = configuration; selectedTool = .brush
+        } catch { message = error.localizedDescription }
+    }
+    func copyBrushResource() {
+        endStroke(); flushBrushResource()
+        do {
+            let resource = try BrushResourceStore.shared.create(name: brushName + " 副本", configuration: brush)
+            brushResources = try BrushResourceStore.shared.resources()
+            brush = try BrushResourceStore.shared.configuration(resource, color: brush)
+            selectedTool = .brush
+        } catch { message = error.localizedDescription }
+    }
+    func renameBrushResource(_ name: String) {
+        guard let id = brush.resourceID else { return }
+        do {
+            try BrushResourceStore.shared.rename(id, name: name)
+            brushResources = try BrushResourceStore.shared.resources()
+        } catch { message = error.localizedDescription }
+    }
+    func resetBrushResource() {
+        endStroke(); resourceSaveTask?.cancel()
+        do {
+            if let id = brush.resourceID { brush = try BrushResourceStore.shared.reset(id, color: brush) }
+            else {
+                var defaults = MangaBrushes.configuration(brush.preset)
+                defaults.red = brush.red; defaults.green = brush.green; defaults.blue = brush.blue
+                brush = defaults
+            }
+            brushResources = try BrushResourceStore.shared.resources()
+        } catch { message = error.localizedDescription }
+    }
+    func importBrushTips(_ urls: [URL], channel: BrushTipChannel) {
+        endStroke()
+        guard urls.count + brush.stampSettings.assetIDs.count <= 16 else {
+            message = "每支笔刷最多使用 16 张笔尖素材。"; return
+        }
+        do {
+            var assets: [BrushTipAsset] = []
+            for url in urls {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                let asset = try BrushTipImporter.load(url, channel: channel)
+                try BrushResourceStore.shared.store(asset); assets.append(asset)
+            }
+            var stamp = brush.stampSettings
+            if stamp.assetIDs.isEmpty { stamp.rotation = .fixed }
+            stamp.assetIDs += assets.map(\.id)
+            brush.stampSettings = stamp
+        } catch { message = error.localizedDescription }
     }
 
     var canUndo: Bool { history.canUndo }
@@ -107,7 +211,10 @@ final class EditorSession: ObservableObject {
         strokeStartTime = timestamp
         let configuration = editingBrush.validated
         let definition = configuration.definition
-        activeStroke = StrokeCommand(definition: definition, layerID: selectedLayerID,
+        let assets: [BrushTipAsset]
+        do { assets = try BrushResourceStore.shared.assets(for: configuration) }
+        catch { message = error.localizedDescription; return }
+        activeStroke = StrokeCommand(tipAssets: assets, resourceRevision: BrushRecipe(configuration).revision, definition: definition, layerID: selectedLayerID,
             samples: [sample(point, pressure, time: 0, altitude: altitude, azimuth: azimuth)],
             brush: configuration, seed: UInt64.random(in: 1...UInt64.max),
             tool: usesTransparentColor ? .eraser : selectedTool, target: selectedEditTarget)

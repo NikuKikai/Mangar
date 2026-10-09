@@ -302,7 +302,7 @@ private struct EditorWorkspace: View {
             if !frame.isEmpty { brushSettingsAnchor = frame }
         }
         .overlay {
-            FloatingPanelOverlay(brush: $session.brush,
+            FloatingPanelOverlay(session: session, brush: $session.brush,
                                  pressureCurve: $session.pressureCurve,
                                  showsPressure: showPressureCurve,
                                  closePressure: { showPressureCurve = false },
@@ -359,10 +359,12 @@ private struct EditorWorkspace: View {
             }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
             session.releaseModifiers()
+            session.flushBrushResource()
             session.saveNow()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             showAppMenu = false
+            session.flushBrushResource()
             session.endStroke()
             session.releaseModifiers()
         }
@@ -559,27 +561,41 @@ private struct EditorWorkspace: View {
             Button { session.selectBrush(.pencil) } label: {
                 Image(systemName: BrushPresetID.pencil.icon)
                     .font(.system(size: 17)).frame(width: 34, height: 34)
-                    .background(session.selectedTool == .brush && session.brush.preset == .pencil
+                    .background(session.selectedTool == .brush && session.brush.resourceID == nil && session.brush.preset == .pencil
                                 ? Color.gray.opacity(0.4) : Color.clear)
             }
             .buttonStyle(ImmediateButtonStyle())
             .keyboardShortcut("p", modifiers: [])
             .help("铅笔")
             .accessibilityLabel("铅笔")
-            .accessibilityAddTraits(session.selectedTool == .brush && session.brush.preset == .pencil ? .isSelected : [])
+            .accessibilityAddTraits(session.selectedTool == .brush && session.brush.resourceID == nil && session.brush.preset == .pencil ? .isSelected : [])
             SlideSelectToolControl(items: BrushPresetID.inkPresets.map {
                 SlideSelectToolItem(id: $0.rawValue, name: $0.name, icon: $0.icon)
-            }, currentID: session.inkPreset.rawValue,
-                selected: session.selectedTool == .brush && session.brush.preset != .pencil,
-                activate: { session.selectBrush(session.inkPreset) }, choose: { id in
+            } + session.brushResources.map {
+                SlideSelectToolItem(id: $0.id.uuidString, name: $0.name, icon: "paintbrush.pointed")
+            }, currentID: session.inkBrushID,
+                selected: session.selectedTool == .brush && (session.brush.resourceID != nil || BrushPresetID.inkPresets.contains(session.brush.preset)),
+                activate: { session.activateInkBrush() }, choose: { id in
                     if let preset = BrushPresetID(rawValue: id) { session.selectBrush(preset) }
+                    else if let resource = session.brushResources.first(where: { $0.id.uuidString == id }) {
+                        session.selectBrushResource(resource)
+                    }
                 })
                 .frame(width: 34, height: 34)
                 .background {
-                    Button("选择墨水笔") { session.selectBrush(session.inkPreset) }
+                    Button("选择墨水笔") { session.activateInkBrush() }
                         .keyboardShortcut("b", modifiers: []).hidden().accessibilityHidden(true)
                 }
                 .help("\(session.inkPreset.name) · 向右滑动选择笔刷")
+            SlideSelectToolControl(items: BrushPresetID.oilPresets.map {
+                SlideSelectToolItem(id: $0.rawValue, name: $0.name, icon: $0.icon)
+            }, currentID: BrushPresetID.oilFlat.rawValue,
+                selected: session.selectedTool == .brush && session.brush.resourceID == nil && session.brush.preset == .oilFlat,
+                activate: { session.selectBrush(.oilFlat) }, choose: { id in
+                    if let preset = BrushPresetID(rawValue: id) { session.selectBrush(preset) }
+                })
+                .frame(width: 34, height: 34)
+                .help("油画笔 · 向右滑动选择笔刷")
             toolButton(.eraser, icon: "eraser.fill", name: "橡皮擦")
                 .keyboardShortcut("e", modifiers: [])
             toolButton(.selection, icon: "rectangle.dashed", name: "矩形选区")
@@ -1340,6 +1356,7 @@ private final class FloatingPanelContainer: UIView {
 }
 
 private struct FloatingPanelOverlay: UIViewRepresentable {
+    @ObservedObject var session: EditorSession
     @Binding var brush: BrushConfiguration
     @Binding var pressureCurve: PressureCurve
     let showsPressure: Bool
@@ -1394,7 +1411,8 @@ private struct FloatingPanelOverlay: UIViewRepresentable {
         }
 
         if showsBrush {
-            let panel = AnyView(BrushParametersPanel(brush: $brush, editDynamics: editDynamics, close: closeBrush).immediateUI())
+            let panel = AnyView(BrushParametersPanel(brush: $brush, brushName: session.brushName, importTips: { session.importBrushTips($0, channel: $1) },
+                reportError: { session.message = $0 }, editDynamics: editDynamics, close: closeBrush).immediateUI())
             if let host = view.brushHost {
                 host.rootView = panel
             } else {
@@ -1408,7 +1426,7 @@ private struct FloatingPanelOverlay: UIViewRepresentable {
             view.brushHost = nil
         }
         if let dynamicsParameter {
-            let panel = AnyView(BrushDynamicsPanel(brush: $brush, parameter: dynamicsParameter,
+            let panel = AnyView(BrushDynamicsPanel(brush: $brush, brushName: session.brushName, parameter: dynamicsParameter,
                 close: closeDynamics).id(dynamicsParameter).immediateUI())
             if let host = view.dynamicsHost { host.rootView = panel }
             else {

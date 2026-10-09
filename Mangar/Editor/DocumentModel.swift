@@ -374,6 +374,8 @@ enum EditorModifier: String, CaseIterable, Hashable {
 }
 
 struct StrokeCommand: Codable {
+    var tipAssets: [BrushTipAsset]? = nil
+    var resourceRevision: String? = nil
     var id: UUID = UUID()
     var definition: BrushDefinition = MangaBrushes.definition(.gPen)
     var layerID: UUID

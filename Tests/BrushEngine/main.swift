@@ -11,8 +11,17 @@ struct BrushEngineChecks {
         BundledBrushTips.resourceDirectory = root.appendingPathComponent("Mangar/Brushes/Presets/Assets")
         let device = MTLCreateSystemDefaultDevice()!
         let queue = device.makeCommandQueue()!
-        let source = try String(contentsOf: root.appendingPathComponent("Mangar/Rendering/BrushShaderSource.txt"), encoding: .utf8) + "\n" +
+        var source = try String(contentsOf: root.appendingPathComponent("Mangar/Rendering/BrushShaderSource.txt"), encoding: .utf8) + "\n" +
+            String(contentsOf: root.appendingPathComponent("Mangar/Brushes/GPU/PigmentMixing.txt"), encoding: .utf8) + "\n" +
             String(contentsOf: root.appendingPathComponent("Mangar/Brushes/GPU/BrushKernels.txt"), encoding: .utf8)
+        source += """
+        kernel void pigmentMixCheck(device float4 *out [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+            if (i != 0) return;
+            out[0] = float4(spectral_mix(float3(1,1,0), float3(0,0,1), 0.5), 1);
+            out[1] = float4(spectral_mix(float3(0), float3(0), 0.5), 1);
+            out[2] = float4(spectral_mix(float3(1), float3(1), 0.5), 1);
+        }
+        """
         let library = try await device.makeLibrary(source: source, options: nil)
         let engine = try MetalBrushEngine(device: device, queue: queue, library: library)
         let layer = UUID()
@@ -51,7 +60,7 @@ struct BrushEngineChecks {
             precondition(condition(), "FAILED: \(name)")
             FileHandle.standardOutput.write(Data("PASS \(name)\n".utf8))
         }
-        check(MemoryLayout<BrushGPUInput>.stride == 32 && MemoryLayout<BrushGPUUniforms>.stride == 176, "Metal ABI")
+        check(MemoryLayout<BrushGPUInput>.stride == 32 && MemoryLayout<BrushGPUUniforms>.stride == 224, "Metal ABI")
         let lowG = area(paint(dot(.gPen, pressure: 0.15)))
         let highG = area(paint(dot(.gPen)))
         check(highG > lowG * 8, "G pen pressure width")
@@ -271,6 +280,7 @@ struct BrushEngineChecks {
         check(abs(observedRadius - 6) < 0.01, "Async cursor readback reports actual ink footprint")
         // Identical explicit settings must render identically regardless of preset identity.
         var custom = dot(.gPen, time: 0.2)
+        custom.brush.wetSettings = BrushWetSettings()
         custom.brush.stampSettings = BrushStampSettings()
         custom.brush.resolvedDynamics = BrushDynamics()
         custom.brush.tipSettings = BrushTipSettings(hardness: 0.6, grain: 0.2, timeRate: 60)
@@ -401,6 +411,110 @@ struct BrushEngineChecks {
         try Data([1,2,3]).write(to: tipURL)
         do { _ = try BrushResourceStore(root: scratch).assets(for: reset); check(false, "Corrupt tip must fail") }
         catch { print("PASS Corrupt tip is rejected") }
+        let spectralPipeline = try await device.makeComputePipelineState(function: library.makeFunction(name: "pigmentMixCheck")!)
+        let spectralResults = device.makeBuffer(length: 48, options: .storageModeShared)!
+        let spectralCommand = queue.makeCommandBuffer()!
+        let spectralEncoder = spectralCommand.makeComputeCommandEncoder()!
+        spectralEncoder.setComputePipelineState(spectralPipeline); spectralEncoder.setBuffer(spectralResults, offset: 0, index: 0)
+        spectralEncoder.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+        spectralEncoder.endEncoding()
+        await withCheckedContinuation { continuation in
+            spectralCommand.addCompletedHandler { _ in continuation.resume() }
+            spectralCommand.commit()
+        }
+        let mixed = spectralResults.contents().bindMemory(to: SIMD4<Float>.self, capacity: 3)
+        check(mixed[0].y > mixed[0].x + 0.08 && mixed[0].y > mixed[0].z + 0.08, "Spectral yellow and blue mix to green")
+        check(mixed[1] == SIMD4(0,0,0,1) && mixed[2] == SIMD4(1,1,1,1), "Spectral equal-color black/white endpoints stay exact")
+        var blueSource = command(.binaryPen, [StrokeSample(x: 80, y: 128, pressure: 1), StrokeSample(x: 285, y: 128, pressure: 1, time: 0.4)], size: 90)
+        blueSource.brush.blue = 1
+        let substrate = paint(blueSource)
+        let substrateImage = image(substrate)
+        func wetStroke(_ mode: BrushMedium = .oil) -> StrokeCommand {
+            var stroke = dot(.gPen)
+            stroke.brush.size = 36; stroke.brush.spacing = 0.15; stroke.brush.flow = 1
+            stroke.brush.red = 1; stroke.brush.green = 1; stroke.brush.blue = 0
+            stroke.brush.resolvedDynamics = BrushDynamics()
+            stroke.brush.renderingSettings = BrushRenderingSettings(deposition: .pigment, accumulation: .flow)
+            stroke.brush.wetSettings = BrushWetSettings(medium: mode, pickup: 0.6, mixing: 1, load: 1,
+                persistence: 0.8, dilution: 0, granulation: 0, edgeDarkening: 0)
+            stroke.definition = stroke.brush.definition
+            return stroke
+        }
+        func pixel(_ result: MetalBrushEngine.Result, x: Int, y: Int = 128) -> [UInt8] {
+            let tile = image(result)[TileKey(layerID: layer, x: x/256, y: y/256)]!
+            let offset = ((y%256)*256 + x%256)*4
+            return Array(tile[offset..<(offset+4)])
+        }
+        let wetDot = paint(wetStroke(), base: substrate.tiles)
+        let mixedPixel = pixel(wetDot, x: 128)
+        check(mixedPixel[1] > mixedPixel[0] + 15 && mixedPixel[1] > mixedPixel[2] + 15,
+              "Wet brush picks up blue substrate and deposits green pigment")
+        var carrier = wetStroke()
+        carrier.brush.wetSettings.load = 0; carrier.brush.wetSettings.pickup = 1
+        carrier.samples = (0...20).map { StrokeSample(x: 260 + Double($0)*7, y: 128, pressure: 1, time: Double($0)*0.01) }
+        let carried = paint(carrier, base: substrate.tiles)
+        let carriedPixel = pixel(carried, x: 370)
+        check(carriedPixel[3] > 20 && carriedPixel[2] >= carriedPixel[3] - 1 && carriedPixel[0] == 0,
+              "Zero-load brush carries original substrate color into transparent canvas across tiles")
+        var noPaint = carrier
+        noPaint.brush.wetSettings.pickup = 0
+        check(alpha(paint(noPaint)).allSatisfy { $0 == 0 }, "Zero load and zero pickup produces no paint")
+        var exhausted = wetStroke()
+        exhausted.brush.size = 20; exhausted.brush.wetSettings.pickup = 0
+        exhausted.brush.wetSettings.persistence = 0
+        exhausted.samples = [StrokeSample(x: 20, y: 128, pressure: 1), StrokeSample(x: 500, y: 128, pressure: 1, time: 1)]
+        let dryTrail = paint(exhausted)
+        check(pixel(dryTrail, x: 25)[3] > pixel(dryTrail, x: 460)[3] + 100,
+              "Finite pigment load depletes along travel")
+        var water = wetStroke(.watercolor)
+        water.brush.wetSettings.pickup = 0
+        let undiluted = alpha(paint(water)).max()!
+        water.brush.wetSettings.dilution = 1
+        check(alpha(paint(water)).max()! < undiluted / 3, "Water dilution produces a translucent wash")
+        water.brush.wetSettings.dilution = 0; water.brush.wetSettings.edgeDarkening = 1
+        let ring = alpha(paint(water))
+        check(ring[128*256+141] > ring[128*256+128] + 50, "Watercolor rim deposits more pigment than center")
+        water.brush.wetSettings.edgeDarkening = 0; water.brush.wetSettings.granulation = 1
+        let grains = alpha(paint(water))
+        check(Set((120...135).map { grains[128*256+$0] }).count > 8, "Watercolor granulation varies with fixed paper coordinates")
+        var clippedWet = wetStroke()
+        let unselectedAlpha = alpha(paint(clippedWet))[128*256+128]
+        let selectedAlpha = alpha(paint(clippedWet, selection: selection))[128*256+128]
+        check(abs(Int(selectedAlpha) - Int(unselectedAlpha)/2) <= 1, "Wet fractional selection applies once")
+        clippedWet.tool = .eraser
+        let wetErased = pixel(paint(clippedWet, base: substrate.tiles), x: 128)
+        check(wetErased[3] == 0, "Wet brush settings do not alter eraser semantics")
+        clippedWet.tool = .brush; clippedWet.target = .mask; clippedWet.brush.red = 0
+        let wetMask = image(paint(clippedWet))[TileKey(layerID: layer, x: 0, y: 0, target: .mask)]!
+        check(wetMask[128*256+128] == 0 && wetMask[0] == 255, "Wet brush settings do not mix mask values")
+        for mode in [BrushMedium.oil, .watercolor] {
+            var stroke = wetStroke(mode)
+            stroke.samples = carrier.samples
+            if mode == .watercolor { stroke.brush.wetSettings.dilution = 0.7; stroke.brush.wetSettings.granulation = 0.4; stroke.brush.wetSettings.edgeDarkening = 0.5 }
+            let expected = image(paint(stroke, base: substrate.tiles))
+            var incremental = stroke; incremental.id = UUID(); incremental.samples = []
+            for sample in stroke.samples {
+                incremental.samples.append(sample)
+                _ = engine.update(incremental, base: substrate.tiles, selection: nil, width: 600, height: 600)
+            }
+            let replayed = image(paint(incremental, base: substrate.tiles))
+            if replayed != expected {
+                for (tile, bytes) in expected {
+                    if let actual = replayed[tile] {
+                        let differences = zip(bytes, actual).map { abs(Int($0) - Int($1)) }.filter { $0 > 0 }
+                        FileHandle.standardOutput.write(Data("WET DIFF \(mode) tile \(tile.x),\(tile.y) count \(differences.count) max \(differences.max() ?? 0)\n".utf8))
+                    }
+                }
+            }
+            check(replayed == expected,
+                  "Colored wet pickup and stroke pigment replay deterministically: \(mode)")
+            _ = engine.update(stroke, base: substrate.tiles, selection: nil, width: 600, height: 600)
+            engine.cancel(); engine.synchronize()
+            check(substrate.tiles.mapValues(bytes) == substrateImage, "Cancelled wet preview preserves original tiles")
+            let previewWet = engine.update(stroke, base: substrate.tiles, selection: nil, width: 600, height: 600)
+            let commitWet = paint(stroke, base: substrate.tiles)
+            check(previewWet.tiles[key] === commitWet.tiles[key], "Wet commit promotes preview without replay")
+        }
         let suiteName = "Mangar.BrushEngineChecks.\(UUID().uuidString)"
         let suite = UserDefaults(suiteName: suiteName)!
         defer { suite.removePersistentDomain(forName: suiteName) }
@@ -411,6 +525,8 @@ struct BrushEngineChecks {
         configuration.resolvedDynamics.opacity.speed = BrushResponseCurve(enabled: true, outputs: [0.2,0.8,1,0.4,0.1])
         configuration.tipSettings.hardness = 0.3
         configuration.tipSettings.pooling = 0.75
+        configuration.wetSettings = BrushWetSettings(medium: .watercolor, pickup: 0.45, mixing: 0.8,
+            load: 0.7, persistence: 0.6, dilution: 0.8, granulation: 0.55, edgeDarkening: 0.9)
         configuration.renderingSettings = BrushRenderingSettings(deposition: .solidInk, binary: true, accumulation: .buildUp)
         AppToolPreferences.saveBrush(configuration, to: suite)
         let savedPencil = configuration

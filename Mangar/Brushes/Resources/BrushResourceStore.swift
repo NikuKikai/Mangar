@@ -3,14 +3,14 @@ import CryptoKit
 
 struct BrushRecipe: Codable, Equatable {
     var formatVersion = 1
-    var engineVersion = 6
+    var engineVersion = 7
     var configuration: BrushConfiguration
     init(_ configuration: BrushConfiguration) {
         var value = configuration.validated
         value.resourceID = nil
         value.red = 0; value.green = 0; value.blue = 0
         value.dynamics = value.resolvedDynamics; value.tip = value.tipSettings
-        value.rendering = value.renderingSettings; value.stamp = value.stampSettings
+        value.rendering = value.renderingSettings; value.stamp = value.stampSettings; value.wet = value.wetSettings
         self.configuration = value
     }
     var revision: String {

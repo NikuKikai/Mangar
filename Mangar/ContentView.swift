@@ -596,6 +596,15 @@ private struct EditorWorkspace: View {
                 })
                 .frame(width: 34, height: 34)
                 .help("油画笔 · 向右滑动选择笔刷")
+            SlideSelectToolControl(items: BrushPresetID.watercolorPresets.map {
+                SlideSelectToolItem(id: $0.rawValue, name: $0.name, icon: $0.icon)
+            }, currentID: BrushPresetID.watercolorWash.rawValue,
+                selected: session.selectedTool == .brush && session.brush.resourceID == nil && session.brush.preset == .watercolorWash,
+                activate: { session.selectBrush(.watercolorWash) }, choose: { id in
+                    if let preset = BrushPresetID(rawValue: id) { session.selectBrush(preset) }
+                })
+                .frame(width: 34, height: 34)
+                .help("水彩笔 · 向右滑动选择笔刷")
             toolButton(.eraser, icon: "eraser.fill", name: "橡皮擦")
                 .keyboardShortcut("e", modifiers: [])
             toolButton(.selection, icon: "rectangle.dashed", name: "矩形选区")
@@ -1412,7 +1421,8 @@ private struct FloatingPanelOverlay: UIViewRepresentable {
 
         if showsBrush {
             let panel = AnyView(BrushParametersPanel(brush: $brush, brushName: session.brushName, importTips: { session.importBrushTips($0, channel: $1) },
-                reportError: { session.message = $0 }, editDynamics: editDynamics, close: closeBrush).immediateUI())
+                reportError: { session.message = $0 }, editDynamics: editDynamics, close: closeBrush,
+                maximumContentHeight: view.bounds.height > 0 ? min(540, max(240, view.bounds.height - 80)) : 540).immediateUI())
             if let host = view.brushHost {
                 host.rootView = panel
             } else {

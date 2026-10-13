@@ -23,6 +23,9 @@ struct BrushGPUUniforms {
     var ink: SIMD4<Float>
     var stamp: SIMD4<Float>
     var images: SIMD4<UInt32>
+    var wet: SIMD4<Float>
+    var medium: SIMD4<Float>
+    var pickupTiles: SIMD4<Int32>
 
     init(stroke: StrokeCommand, inputCount: Int, capacity: Int, width: Int, height: Int) {
         let b = stroke.brush.validated
@@ -34,6 +37,11 @@ struct BrushGPUUniforms {
         color = SIMD4(Float(b.red), Float(b.green), Float(b.blue), 1)
         counts = SIMD4(UInt32(inputCount), UInt32(truncatingIfNeeded: stroke.seed), UInt32(truncatingIfNeeded: stroke.seed >> 32), b.renderingSettings.accumulation.rawValue)
         tile = SIMD4(0, 0, Float(width), Float(height))
+        let moisture = b.wetSettings
+        let activeMedium: BrushMedium = stroke.tool == .eraser || stroke.target == .mask ? .dry : moisture.medium
+        wet = SIMD4(Float(moisture.pickup), Float(moisture.mixing), Float(moisture.load), Float(moisture.persistence))
+        medium = SIMD4(Float(activeMedium.rawValue), Float(moisture.dilution), Float(moisture.granulation), Float(moisture.edgeDarkening))
+        pickupTiles = .zero
         let tip = b.stampSettings
         stamp = SIMD4(Float(tip.aspect), Float(tip.angle * .pi / 180), Float(tip.rotation.rawValue), 0)
         images = SIMD4(UInt32(stroke.tipAssets?.count ?? 0), tip.sequence.rawValue, 0, 0)

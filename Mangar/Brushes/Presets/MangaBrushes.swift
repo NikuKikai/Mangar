@@ -5,6 +5,8 @@ enum MangaBrushes {
         switch preset {
         case .pencil:
             BrushDefinition(preset: preset, tip: BrushTipSettings(hardness: 0.75, grain: 0.85, tiltElongation: 0.65))
+        case .watercolorWash:
+            BrushDefinition(preset: preset, tip: BrushTipSettings(hardness: 0.3))
         case .oilFlat:
             BrushDefinition(preset: preset)
         case .gPen:
@@ -30,12 +32,24 @@ enum MangaBrushes {
                 outputs: (0...4).map { 0.025 + 0.975 * pow(Double($0) / 4, 1.35) })
         case .technicalPen:
             result.size.speed = BrushResponseCurve(enabled: true, outputs: [1, sqrt(0.75), sqrt(0.5), 0.5, 0.15])
+        case .watercolorWash:
+            result.size.pressure = BrushResponseCurve(enabled: true, outputs: [0.35, 0.5125, 0.675, 0.8375, 1])
+            result.flow.pressure = BrushResponseCurve(enabled: true, outputs: [0.2, 0.4, 0.6, 0.8, 1])
         case .oilFlat:
             result.size.pressure = BrushResponseCurve(enabled: true, outputs: [0.3, 0.475, 0.65, 0.825, 1])
             result.flow.pressure = BrushResponseCurve(enabled: true, outputs: [0.25, 0.4375, 0.625, 0.8125, 1])
         case .binaryPen: break
         }
         return result
+    }
+
+    static func wet(_ preset: BrushPresetID) -> BrushWetSettings {
+        switch preset {
+        case .oilFlat: BrushWetSettings(medium: .oil, pickup: 0.55, mixing: 1, load: 1, persistence: 0.8)
+        case .watercolorWash: BrushWetSettings(medium: .watercolor, pickup: 0.7, mixing: 1, load: 0.7,
+            persistence: 0.65, dilution: 0.65, granulation: 0.3, edgeDarkening: 0.4)
+        default: BrushWetSettings()
+        }
     }
 
     static func stamp(_ preset: BrushPresetID) -> BrushStampSettings {
@@ -52,6 +66,8 @@ enum MangaBrushes {
         case .pencil:
             result.size = 16; result.flow = 0.18; result.spacing = 0.12
             result.accumulation = .flow
+        case .watercolorWash:
+            result.size = 80; result.flow = 0.4; result.spacing = 0.08; result.accumulation = .flow
         case .oilFlat:
             result.size = 60; result.flow = 0.7; result.spacing = 0.08
             result.accumulation = .flow

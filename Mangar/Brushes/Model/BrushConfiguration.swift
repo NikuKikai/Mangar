@@ -1,7 +1,8 @@
 import Foundation
 
 enum BrushPresetID: String, Codable, CaseIterable {
-    case pencil, gPen, technicalPen, binaryPen, oilFlat
+    case pencil, gPen, technicalPen, binaryPen, oilFlat, watercolorWash
+    static let watercolorPresets: [Self] = [.watercolorWash]
     static let oilPresets: [Self] = [.oilFlat]
     static let inkPresets: [Self] = [.gPen, .technicalPen, .binaryPen]
     var icon: String {
@@ -11,6 +12,7 @@ enum BrushPresetID: String, Codable, CaseIterable {
         case .technicalPen: "pencil.tip"
         case .binaryPen: "square.fill"
         case .oilFlat: "paintbrush.fill"
+        case .watercolorWash: "paintbrush.pointed.fill"
         }
     }
     var name: String {
@@ -20,6 +22,7 @@ enum BrushPresetID: String, Codable, CaseIterable {
         case .technicalPen: "针管笔"
         case .binaryPen: "二值笔"
         case .oilFlat: "平头油画笔"
+        case .watercolorWash: "水彩洗染笔"
         }
     }
 }
@@ -54,6 +57,11 @@ struct BrushConfiguration: Codable, Equatable {
     var rendering: BrushRenderingSettings? = nil
     var resourceID: UUID? = nil
     var stamp: BrushStampSettings? = nil
+    var wet: BrushWetSettings? = nil
+    var wetSettings: BrushWetSettings {
+        get { (wet ?? MangaBrushes.wet(preset)).validated }
+        set { wet = newValue.validated }
+    }
     var stampSettings: BrushStampSettings {
         get { (stamp ?? MangaBrushes.stamp(preset)).validated }
         set { stamp = newValue.validated }
@@ -110,6 +118,7 @@ struct BrushConfiguration: Codable, Equatable {
         result.dynamics = dynamics?.validated
         result.tip = tip?.validated
         result.stamp = stamp?.validated
+        result.wet = wet?.validated
         return result
     }
 

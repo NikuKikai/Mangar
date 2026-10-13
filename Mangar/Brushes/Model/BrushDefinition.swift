@@ -14,7 +14,7 @@ struct BrushRenderingSettings: Codable, Equatable {
 
 /// Frozen execution identity and tip settings; all scalar input dynamics live in BrushDynamics.
 struct BrushDefinition: Codable, Equatable {
-    var version: Int = 6
+    var version: Int = 7
     var preset: BrushPresetID
     var tip: BrushTipSettings = BrushTipSettings()
     var binary: Bool = false
@@ -30,6 +30,7 @@ struct BrushDefinition: Codable, Equatable {
     func maximumReach(_ brush: BrushConfiguration) -> Double {
         brush.size * 0.5 * brush.resolvedDynamics.size.maximum * (1 + brush.sizeJitter) *
             (1 + tip.tiltElongation) * (1 + tip.pooling) * max(1, brush.stampSettings.aspect) *
-            (brush.stampSettings.assetIDs.isEmpty ? 1 : 1.414214) + brush.size * brush.positionJitter * 1.414214 + 2
+            (brush.stampSettings.assetIDs.isEmpty ? 1 : 1.414214) *
+            (brush.wetSettings.medium == .watercolor ? 1 + 0.12 * brush.wetSettings.dilution : 1) + brush.size * brush.positionJitter * 1.414214 + 2
     }
 }

@@ -1,7 +1,7 @@
 // Concatenated with the document shader library. All brush math lives here.
 struct BrushInput { float4 point; float4 orientation; };
-struct BrushDab { float4 geometry; float4 shape; uint4 resource; };
-struct BrushState { BrushInput last; float4 phaseDwell; uint4 counters; };
+struct BrushDab { float4 geometry; float4 shape; uint4 resource; float4 paint; };
+struct BrushState { BrushInput last; float4 phaseDwell; uint4 counters; float4 wetColor; float4 wetState; };
 struct BrushUniforms {
     float4 settings; // diameter, stroke opacity, flow, spacing
     float4 dynamics; // tilt elongation
@@ -14,6 +14,9 @@ struct BrushUniforms {
     float4 ink; // solid deposition
     float4 stamp; // aspect, angle offset, rotation mode
     uint4 images; // image count, selection mode
+    float4 wet; // pickup, mixing, paint load, carry distance
+    float4 medium; // mode, dilution, granulation, edge darkening
+    int4 pickupTiles; // window tile origin and dimensions
 };
 
 uint brushHash(uint value) {
@@ -53,8 +56,65 @@ BrushInput brushMix(BrushInput a, BrushInput b, float t) {
     orientation.y = a.orientation.y + delta * t;
     return {mix(a.point, b.point, t), orientation};
 }
+float4 brushPickup(BrushInput p, float radius, float aspect, float angle, uint image,
+                   constant BrushUniforms &u, texture2d_array<float, access::read> source,
+                   texture2d_array<float, access::read> selection, texture2d_array<float, access::sample> tips) {
+    float4 total = 0.0; float weightSum = 0.0;
+    float c = cos(angle), s = sin(angle);
+    constexpr sampler tipSampler(coord::normalized, address::clamp_to_zero, filter::linear);
+    for (int y = -2; y <= 2; ++y) for (int x = -2; x <= 2; ++x) {
+        float2 q = float2(x,y) * 0.4;
+        float weight = u.images.x == 0 ? float(length(q) <= 1.0) :
+            tips.sample(tipSampler, ((q * 0.5 + 0.5) * float(tips.get_width()-2) + 1.0) / float(tips.get_width()), image).r;
+        if (weight <= 0.0) continue;
+        float2 offset = float2(q.x * aspect, q.y) * radius;
+        offset *= min(1.0, 128.0 / max(length(offset), 0.00001));
+        float2 position = p.point.xy + float2(offset.x*c - offset.y*s, offset.x*s + offset.y*c);
+        weightSum += weight;
+        if (any(position < 0.0) || position.x >= u.tile.z || position.y >= u.tile.w) continue;
+        int2 pixel = int2(floor(position));
+        int2 tile = pixel / 256 - u.pickupTiles.xy;
+        if (any(tile < 0) || tile.x >= u.pickupTiles.z || tile.y >= u.pickupTiles.w) continue;
+        uint slice = uint(tile.y * u.pickupTiles.z + tile.x);
+        uint2 local = uint2(pixel % 256);
+        total += source.read(local, slice) * selection.read(local, slice).r * weight;
+    }
+    return total.a > 0.00001 ? float4(total.rgb / total.a, total.a / max(weightSum, 0.00001)) : float4(0.0);
+}
+float4 brushWetPaint(BrushInput p, float radius, float aspect, float angle, uint image,
+                     thread BrushState &state, constant BrushUniforms &u,
+                     texture2d_array<float, access::read> source, texture2d_array<float, access::read> selection,
+                     texture2d_array<float, access::sample> tips) {
+    bool first = state.counters.z == 0;
+    if (first) {
+        state.counters.z = 1;
+        state.wetColor = float4(u.color.rgb, 0.0);
+        state.wetState = float4(u.wet.z, p.point.xy, p.point.w);
+    }
+    float travel = distance(p.point.xy, state.wetState.yz) / max(2.0 * radius, 1.0);
+    float step = first ? 1.0 : max(travel, max(0.0, p.point.w - state.wetState.w) * 2.0);
+    float decay = first ? 1.0 : exp(-step / (1.0 + u.wet.w * 24.0));
+    state.wetState.x *= decay; state.wetColor.a *= decay;
+    float4 picked = brushPickup(p, radius, aspect, angle, image, u, source, selection, tips);
+    float take = (1.0 - exp(-u.wet.x * u.wet.y * step * 2.0)) * picked.a;
+    if (take > 0.00001) {
+        float existing = max(state.wetState.x, state.wetColor.a);
+        float ratio = take / max(existing * (1.0 - take) + take, 0.00001);
+        state.wetColor.rgb = spectral_mix(state.wetColor.rgb, picked.rgb, ratio);
+        state.wetColor.a = mix(state.wetColor.a, picked.a, take);
+    }
+    float reload = (1.0 - exp(-(1.0 - u.wet.w) * step)) * state.wetState.x;
+    state.wetColor.rgb = spectral_mix(state.wetColor.rgb, u.color.rgb, reload);
+    // Quantize reservoir at every dab, never only at a GPU batch boundary.
+    state.wetColor = float4(half4(state.wetColor));
+    state.wetState.x = float(half(state.wetState.x));
+    state.wetState.yzw = float3(p.point.xy, p.point.w);
+    return float4(state.wetColor.rgb, max(state.wetState.x, state.wetColor.a));
+}
 void brushEmit(BrushInput p, float dwell, float speed, thread BrushState &state,
-               device BrushDab *dabs, thread uint &count, constant BrushUniforms &u, const device BrushCurve *curves) {
+               device BrushDab *dabs, thread uint &count, constant BrushUniforms &u, const device BrushCurve *curves,
+               texture2d_array<float, access::read> source, texture2d_array<float, access::read> selection,
+               texture2d_array<float, access::sample> tips) {
     // CPU microsegment limits guarantee capacity; never silently truncate input.
     uint index = state.counters.y++;
     float radius = max(0.0, u.settings.x * brushDynamic(0, p, speed, curves) * 0.5);
@@ -69,13 +129,19 @@ void brushEmit(BrushInput p, float dwell, float speed, thread BrushState &state,
         flow = flow > 0.0 ? 1.0 : 0.0;
     }
     if (radius <= 0.0) flow = 0.0;
+    if (u.medium.x == 2.0) radius *= 1.0 + 0.12 * u.medium.y;
     state.phaseDwell.w = radius;
     float2 scatter = float2(brushRandom(index, 3, u), brushRandom(index, 4, u)) * 2.0 - 1.0;
     float aspect = u.stamp.x * (1.0 + u.dynamics.x * (1.0 - sin(clamp(p.orientation.x, 0.0, M_PI_F * 0.5))));
     float angle = u.stamp.y + (u.stamp.z == 2.0 ? p.orientation.y : u.stamp.z == 1.0 ? as_type<float>(state.counters.w) : 0.0);
     uint image = u.images.x == 0 ? 0 : u.images.y == 0 ? index % u.images.x : min(u.images.x - 1, uint(brushRandom(index, 5, u) * float(u.images.x)));
+    float4 paint = float4(u.color.rgb, 1.0);
+    if (u.medium.x != 0.0) {
+        paint = brushWetPaint(p, radius, aspect, angle, image, state, u, source, selection, tips);
+        opacity *= paint.a * (u.medium.x == 2.0 ? 1.0 - 0.8 * u.medium.y : 1.0);
+    }
     dabs[count++] = {float4(p.point.xy + scatter * u.jitter.z * u.settings.x, radius, clamp(flow, 0.0, 1.0)),
-                    float4(aspect, angle, u.surface.y, clamp(opacity, 0.0, 1.0)), uint4(image, 0, 0, 0)};
+                    float4(aspect, angle, u.surface.y, clamp(opacity, 0.0, 1.0)), uint4(image, 0, 0, 0), paint};
 }
 
 kernel void brushGenerate(const device BrushInput *inputs [[buffer(0)]],
@@ -84,6 +150,9 @@ kernel void brushGenerate(const device BrushInput *inputs [[buffer(0)]],
                           device uint &dabCount [[buffer(3)]],
                           constant BrushUniforms &u [[buffer(4)]],
                           const device BrushCurve *curves [[buffer(5)]],
+                          texture2d_array<float, access::read> source [[texture(0)]],
+                          texture2d_array<float, access::read> selection [[texture(1)]],
+                          texture2d_array<float, access::sample> tips [[texture(2)]],
                           uint gid [[thread_position_in_grid]]) {
     if (gid != 0) return;
     BrushState state = persistent;
@@ -93,7 +162,7 @@ kernel void brushGenerate(const device BrushInput *inputs [[buffer(0)]],
         if (state.counters.x == 0) {
             state.counters.x = 1;
             state.last = p;
-            brushEmit(p, 0.0, 0.0, state, dabs, count, u, curves);
+            brushEmit(p, 0.0, 0.0, state, dabs, count, u, curves, source, selection, tips);
             continue;
         }
         BrushInput previous = state.last;
@@ -113,14 +182,14 @@ kernel void brushGenerate(const device BrushInput *inputs [[buffer(0)]],
         float crossing = 1.0 - phase;
         for (; crossing <= phaseAdvance; crossing += 1.0) {
             float t = crossing / max(phaseAdvance, 0.000001);
-            brushEmit(brushMix(previous, p, t), mix(oldDwell, dwell, t), mix(oldSpeed, speed, t), state, dabs, count, u, curves);
+            brushEmit(brushMix(previous, p, t), mix(oldDwell, dwell, t), mix(oldSpeed, speed, t), state, dabs, count, u, curves, source, selection, tips);
         }
         // A pressure/tilt change must update the contact footprint even without travel.
         bool tipChanged = abs(p.point.z - previous.point.z) > 0.0001 ||
             abs(p.orientation.x - previous.orientation.x) > 0.0001 ||
             abs(sin(p.orientation.y - previous.orientation.y)) > 0.0001;
         if (phaseAdvance < 0.000001 && tipChanged) {
-            brushEmit(p, dwell, speed, state, dabs, count, u, curves);
+            brushEmit(p, dwell, speed, state, dabs, count, u, curves, source, selection, tips);
         }
         state.phaseDwell.x = fract(phase + phaseAdvance);
         state.phaseDwell.y = dwell;
@@ -157,6 +226,8 @@ kernel void brushRaster(texture2d<float, access::read> base [[texture(0)]],
                         texture2d<float, access::write> output [[texture(3)]],
                         texture2d<float, access::read> selection [[texture(4)]],
                         texture2d_array<float, access::sample> tips [[texture(5)]],
+                        texture2d<float, access::read> previousPaint [[texture(6)]],
+                        texture2d<float, access::write> nextPaint [[texture(7)]],
                         const device BrushDab *dabs [[buffer(0)]],
                         const device uint *indices [[buffer(1)]],
                         const device uint *counts [[buffer(2)]],
@@ -166,6 +237,7 @@ kernel void brushRaster(texture2d<float, access::read> base [[texture(0)]],
     if (gid.x >= 256 || gid.y >= 256) return;
     float2 p = u.tile.xy + float2(gid) + 0.5;
     float coverage = previousCoverage.read(gid).r;
+    float3 paintRGB = u.medium.x == 0.0 ? u.color.rgb : previousPaint.read(gid).rgb;
     uint block = gid.x / 16 + (gid.y / 16) * 16;
     if (p.x < u.tile.z && p.y < u.tile.w) {
         for (uint j = 0; j < counts[block]; ++j) {
@@ -190,21 +262,36 @@ kernel void brushRaster(texture2d<float, access::read> base [[texture(0)]],
                 float paper = float(h & 0xffffu) / 65535.0;
                 edge *= mix(1.0, smoothstep(0.12, 0.9, paper), d.shape.z);
             }
+            if (u.medium.x == 2.0) {
+                float border = smoothstep(0.45, 0.85, radial / max(r, 0.00001));
+                edge *= 1.0 - u.medium.w * (1.0 - border);
+                uint h = brushHash(uint(p.x) ^ brushHash(uint(p.y) + 0x7891abdu));
+                float paper = float(h & 0xffffu) / 65535.0;
+                edge *= mix(1.0, 0.35 + 0.65 * paper, u.medium.z);
+            }
             float ink = edge * d.geometry.w;
+            float3 nextRGB = coverage > 0.00001 ? paintRGB / coverage : d.paint.rgb;
+            if (u.medium.x != 0.0 && ink * d.shape.w > 0.0) {
+                float ratio = clamp(ink * d.shape.w / max(coverage, ink * d.shape.w), 0.0, 1.0);
+                nextRGB = mix(nextRGB, d.paint.rgb, ratio);
+            }
             float opacity = d.shape.w;
             if (u.counts.w == 0) coverage = max(coverage, ink * opacity);
             else if (u.counts.w == 2) coverage = 1.0 - (1.0 - coverage) * (1.0 - ink * opacity);
             else coverage = max(coverage, coverage + (opacity - coverage) * ink);
             coverage = float(half(coverage));
+            if (u.medium.x != 0.0 && ink * opacity > 0.0) paintRGB = float3(half3(nextRGB * coverage));
         }
     }
     nextCoverage.write(float4(coverage, 0, 0, 1), gid);
+    if (u.medium.x != 0.0) nextPaint.write(float4(paintRGB, coverage), gid);
+    if (u.medium.x != 0.0) paintRGB /= max(coverage, 0.00001);
     float a = coverage * selection.read(gid).r;
     float4 old = base.read(gid);
     float4 result;
     if (u.modes.y != 0) result = float4(mix(old.r, u.modes.x != 0 ? 1.0 : u.color.r, a), 0, 0, 1);
     else if (u.modes.x != 0) result = old * (1.0 - a);
-    else result = float4(u.color.rgb * a, a) + old * (1.0 - a);
+    else result = float4(paintRGB * a, a) + old * (1.0 - a);
     output.write(result, gid);
     bool changed = u.modes.y != 0 ? abs(result.r - old.r) >= (0.5 / 255.0) : any(abs(result - old) >= (0.5 / 255.0));
     if (changed) {

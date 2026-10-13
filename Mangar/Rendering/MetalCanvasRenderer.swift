@@ -118,9 +118,11 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         if !usesRasterOrderGroups {
             shaderSource = shaderSource.replacingOccurrences(of: ", raster_order_group(0)", with: "")
         }
-        guard let brushURL = Bundle.main.url(forResource: "BrushKernels", withExtension: "txt") else {
+        guard let pigmentURL = Bundle.main.url(forResource: "PigmentMixing", withExtension: "txt"),
+              let brushURL = Bundle.main.url(forResource: "BrushKernels", withExtension: "txt") else {
             throw RendererError.unavailable
         }
+        shaderSource += "\n" + (try String(contentsOf: pigmentURL, encoding: .utf8))
         shaderSource += "\n" + (try String(contentsOf: brushURL, encoding: .utf8))
         let library = try device.makeLibrary(source: shaderSource, options: nil)
         guard let clearLayer = library.makeFunction(name: "clearLayer"),

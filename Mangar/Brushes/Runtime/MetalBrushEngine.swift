@@ -10,6 +10,8 @@ final class MetalBrushEngine {
         let output: MTLTexture
         var coverage: MTLTexture
         var spareCoverage: MTLTexture
+        var paintColor: MTLTexture?
+        var sparePaintColor: MTLTexture?
         let bounds: MTLBuffer
     }
     private final class Transaction {
@@ -17,12 +19,13 @@ final class MetalBrushEngine {
         let state: MTLBuffer
         let selection: SelectionSnapshot?
         let compiled: CompiledBrush
+        let pickupBase: [TileKey: MTLTexture]
         var processed = 0
         var last: StrokeSample?
         var working: [TileKey: WorkingTile] = [:]
         var dirty: [TileKey: CGRect] = [:]
-        init(id: UUID, state: MTLBuffer, selection: SelectionSnapshot?, compiled: CompiledBrush) {
-            self.id = id; self.state = state; self.selection = selection; self.compiled = compiled
+        init(id: UUID, state: MTLBuffer, selection: SelectionSnapshot?, compiled: CompiledBrush, base: [TileKey: MTLTexture]) {
+            self.id = id; self.state = state; self.selection = selection; self.compiled = compiled; self.pickupBase = base
         }
     }
     struct Result {
@@ -33,6 +36,9 @@ final class MetalBrushEngine {
     }
 
     private let tipCache = BrushTipTextureCache()
+    private let pickupWindow: BrushPickupWindow
+    private let emptyCanvas: MTLTexture
+    private let emptyPaintColor: MTLTexture
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let generate: MTLComputePipelineState
@@ -55,6 +61,9 @@ final class MetalBrushEngine {
 
     init(device: MTLDevice, queue: MTLCommandQueue, library: MTLLibrary) throws {
         self.device = device; self.queue = queue
+        pickupWindow = BrushPickupWindow(device: device)
+        emptyCanvas = Self.texture(device, format: .rgba8Unorm, fill: 0)
+        emptyPaintColor = Self.texture(device, format: .rgba16Float, fill: 0)
         func pipeline(_ name: String) throws -> MTLComputePipelineState {
             guard let function = library.makeFunction(name: name) else { throw BrushError.unavailable }
             return try device.makeComputePipelineState(function: function)
@@ -62,7 +71,7 @@ final class MetalBrushEngine {
         generate = try pipeline("brushGenerate")
         bin = try pipeline("brushBin")
         raster = try pipeline("brushRaster")
-        dabBuffer = device.makeBuffer(length: Self.dabCapacity * 48, options: .storageModePrivate)!
+        dabBuffer = device.makeBuffer(length: Self.dabCapacity * 64, options: .storageModePrivate)!
         dabCountBuffer = device.makeBuffer(length: 4, options: .storageModePrivate)!
         indexBuffer = device.makeBuffer(length: 256 * Self.dabCapacity * 4, options: .storageModePrivate)!
         subtileCountBuffer = device.makeBuffer(length: 256 * 4, options: .storageModePrivate)!
@@ -81,10 +90,10 @@ final class MetalBrushEngine {
     func update(_ stroke: StrokeCommand, base: [TileKey: MTLTexture],
                 selection: SelectionSnapshot?, width: Int, height: Int) -> Result {
         if transaction?.id != stroke.id {
-            let state = device.makeBuffer(length: 64, options: .storageModeShared)!
+            let state = device.makeBuffer(length: 96, options: .storageModeShared)!
             memset(state.contents(), 0, state.length)
             transaction = Transaction(id: stroke.id, state: state, selection: selection,
-                compiled: CompiledBrush(device: device, queue: queue, cache: tipCache, stroke: stroke, capacity: Self.dabCapacity, width: width, height: height))
+                compiled: CompiledBrush(device: device, queue: queue, cache: tipCache, stroke: stroke, capacity: Self.dabCapacity, width: width, height: height), base: base)
         }
         let context = transaction!
         guard context.processed < stroke.samples.count else { return result(context) }
@@ -114,6 +123,11 @@ final class MetalBrushEngine {
             let count = dabCountBuffer
             var uniforms = context.compiled.uniforms
             uniforms.counts.x = UInt32(batch.count)
+            if uniforms.medium.x != 0 {
+                uniforms.pickupTiles = pickupWindow.encode(command: command,
+                    points: batch + (previous.map { [$0] } ?? []), base: context.pickupBase, layer: stroke.layerID,
+                    selection: context.selection, empty: emptyCanvas, fullSelection: fullSelection, emptySelection: emptySelection)
+            }
             let generator = command.makeComputeCommandEncoder()!
             generator.label = "Generate brush dabs"
             generator.setComputePipelineState(generate)
@@ -123,6 +137,9 @@ final class MetalBrushEngine {
             generator.setBuffer(count, offset: 0, index: 3)
             generator.setBytes(&uniforms, length: MemoryLayout<BrushGPUUniforms>.stride, index: 4)
             generator.setBuffer(context.compiled.curves, offset: 0, index: 5)
+            generator.setTexture(pickupWindow.colors, index: 0)
+            generator.setTexture(pickupWindow.selection, index: 1)
+            generator.setTexture(context.compiled.tips, index: 2)
             generator.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
             generator.endEncoding()
 
@@ -163,7 +180,10 @@ final class MetalBrushEngine {
                         tile = WorkingTile(base: source,
                             output: Self.texture(device, format: source.pixelFormat, fill: 0),
                             coverage: Self.texture(device, format: .r16Float, fill: 0),
-                            spareCoverage: Self.texture(device, format: .r16Float, fill: 0), bounds: gpuBounds)
+                            spareCoverage: Self.texture(device, format: .r16Float, fill: 0),
+                            paintColor: uniforms.medium.x == 0 ? nil : Self.texture(device, format: .rgba16Float, fill: 0),
+                            sparePaintColor: uniforms.medium.x == 0 ? nil : Self.texture(device, format: .rgba16Float, fill: 0),
+                            bounds: gpuBounds)
                     }
                     uniforms.tile.x = Float(tx * tileSize); uniforms.tile.y = Float(ty * tileSize)
                     let binner = command.makeComputeCommandEncoder()!
@@ -182,6 +202,8 @@ final class MetalBrushEngine {
                     encoder.setTexture(tile.spareCoverage, index: 2)
                     encoder.setTexture(tile.output, index: 3)
                     encoder.setTexture(context.compiled.tips, index: 5)
+                    encoder.setTexture(tile.paintColor ?? emptyPaintColor, index: 6)
+                    encoder.setTexture(tile.sparePaintColor ?? emptyPaintColor, index: 7)
                     encoder.setTexture(context.selection?.tiles[selectionKey] ??
                         (context.selection?.defaultCoverage == 0 ? emptySelection : fullSelection), index: 4)
                     encoder.setBuffer(dabs, offset: 0, index: 0)
@@ -192,6 +214,7 @@ final class MetalBrushEngine {
                     encoder.dispatchThreads(MTLSize(width: 256, height: 256, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
                     encoder.endEncoding()
                     swap(&tile.coverage, &tile.spareCoverage)
+                    swap(&tile.paintColor, &tile.sparePaintColor)
                     context.working[key] = tile
                     let rect = CGRect(x: tx * tileSize, y: ty * tileSize, width: tileSize, height: tileSize).intersection(affected)
                     context.dirty[key] = (context.dirty[key] ?? .null).union(rect)
@@ -239,7 +262,7 @@ final class MetalBrushEngine {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: size, height: size, mipmapped: false)
         descriptor.storageMode = .shared; descriptor.usage = [.shaderRead, .shaderWrite]
         let texture = device.makeTexture(descriptor: descriptor)!
-        let channels = format == .rgba8Unorm ? 4 : (format == .r16Float ? 2 : 1)
+        let channels = format == .rgba16Float ? 8 : format == .rgba8Unorm ? 4 : (format == .r16Float ? 2 : 1)
         let data = Data(repeating: fill, count: size * size * channels)
         data.withUnsafeBytes { texture.replace(region: MTLRegionMake2D(0, 0, size, size), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: size * channels) }
         return texture

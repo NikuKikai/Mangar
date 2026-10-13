@@ -7,6 +7,7 @@ struct BrushParametersPanel: View {
     let reportError: (String) -> Void
     let editDynamics: (BrushParameter) -> Void
     let close: () -> Void
+    var maximumContentHeight: CGFloat = 540
 
     private var isInk: Bool { brush.definition.isSolidInk }
     private let labelWidth: CGFloat = 58
@@ -19,6 +20,26 @@ struct BrushParametersPanel: View {
                 Button(action: close) { Image(systemName: "xmark").font(.system(size: 10)).frame(width: 18, height: 18) }
                     .accessibilityLabel("关闭画笔参数")
             }.frame(height: 20)
+            ScrollView {
+                controls
+            }.frame(height: min(maximumContentHeight, contentHeight))
+                .scrollBounceBehavior(.basedOnSize)
+
+        }
+        .buttonStyle(ImmediateButtonStyle())
+        .padding(6).frame(width: 264)
+        .background(Color(red: 0.17, green: 0.18, blue: 0.19))
+        .overlay(Rectangle().stroke(Color.gray.opacity(0.7), lineWidth: 1))
+        .shadow(color: .black.opacity(0.6), radius: 6, x: 2, y: 3)
+    }
+
+    private var contentHeight: CGFloat {
+        465 + (brush.stampSettings.assetIDs.isEmpty ? 0 : 63) +
+            (brush.wetSettings.medium == .dry ? 0 : 92) +
+            (brush.wetSettings.medium == .watercolor ? 60 : 0)
+    }
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 2) {
             row("笔刷大小", value: $brush.size, range: 1...2000, parameter: .size)
             row("不透明度", value: $brush.opacity, range: 0...1, parameter: .opacity)
             row(isInk ? "出墨量" : "流量", value: $brush.flow, range: 0...1, parameter: .flow)
@@ -54,14 +75,26 @@ struct BrushParametersPanel: View {
             row("停留扩墨", value: tip(\.pooling), range: 0...1)
             choices("累积模式", values: BrushAccumulation.allCases,
                     selection: rendering(\.accumulation), name: { $0.name })
+            Rectangle().fill(.white.opacity(0.12)).frame(height: 1).padding(.vertical, 2)
+            choices("媒介", values: BrushMedium.allCases, selection: wet(\.medium), name: { $0.name })
+            if brush.wetSettings.medium != .dry {
+                row("拾色量", value: wet(\.pickup), range: 0...1)
+                row("混色强度", value: wet(\.mixing), range: 0...1)
+                row("颜料量", value: wet(\.load), range: 0...1)
+                row("携色距离", value: wet(\.persistence), range: 0...1)
+                if brush.wetSettings.medium == .watercolor {
+                    row("含水量", value: wet(\.dilution), range: 0...1)
+                    row("颗粒强度", value: wet(\.granulation), range: 0...1)
+                    row("边缘积色", value: wet(\.edgeDarkening), range: 0...1)
+                }
+                Text("拾取当前图层；颜料量为 0 时仅携色。")
+                    .font(.system(size: 9)).foregroundStyle(.secondary)
+            }
         }
-        .buttonStyle(ImmediateButtonStyle())
-        .padding(6).frame(width: 264)
-        .background(Color(red: 0.17, green: 0.18, blue: 0.19))
-        .overlay(Rectangle().stroke(Color.gray.opacity(0.7), lineWidth: 1))
-        .shadow(color: .black.opacity(0.6), radius: 6, x: 2, y: 3)
     }
-
+    private func wet<Value>(_ key: WritableKeyPath<BrushWetSettings, Value>) -> Binding<Value> {
+        Binding(get: { brush.wetSettings[keyPath: key] }, set: { brush.wetSettings[keyPath: key] = $0 })
+    }
     private func stamp<Value>(_ key: WritableKeyPath<BrushStampSettings, Value>) -> Binding<Value> {
         Binding(get: { brush.stampSettings[keyPath: key] }, set: { brush.stampSettings[keyPath: key] = $0 })
     }

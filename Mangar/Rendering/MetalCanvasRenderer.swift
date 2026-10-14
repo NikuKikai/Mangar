@@ -64,6 +64,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private var maskViewTargets: [Int: MTLTexture] = [:]
     private var maskThumbnailCache: [UUID: UIImage] = [:]
     private let brushChanges = BrushChangeTracker()
+    private let tileContents: TileContentTracker
+    private(set) var tileContentBounds: [TileKey: CGRect] = [:]
     private let brushEngine: MetalBrushEngine
     private let polygonRasterizer: PolygonMaskRasterizer
     private let clearLayerPipeline: MTLComputePipelineState
@@ -71,7 +73,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private let lassoLinePipeline: MTLRenderPipelineState
     private let selectionEditPipeline: MTLComputePipelineState
     private let selectionBoundsPipeline: MTLComputePipelineState
-    private let paintBoundsPipeline: MTLComputePipelineState
+    private let selectionDeviationPipeline: MTLComputePipelineState
     private let usesRasterOrderGroups: Bool
     private var groupBackdrops: [Int: MTLTexture] = [:]
     private var curveTextures: [UUID: (LayerCurveEffect, MTLTexture)] = [:]
@@ -141,7 +143,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
               let lassoLineFragment = library.makeFunction(name: "lassoLineFragment"),
               let selectionEdit = library.makeFunction(name: "editSelection"),
               let selectionBounds = library.makeFunction(name: "selectionTileBounds"),
-              let paintBounds = library.makeFunction(name: "paintTileBounds"),
+              let selectionDeviation = library.makeFunction(name: "selectionTileDeviationBounds"),
               let vertex = library.makeFunction(name: "tileVertex"),
               let tileFragment = library.makeFunction(name: "tileFragment"),
               let layerCompositeFragment = library.makeFunction(name: usesRasterOrderGroups
@@ -164,12 +166,13 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         maskDescriptor.fragmentFunction = maskView
         maskDescriptor.colorAttachments[0].pixelFormat = .r8Unorm
         self.maskViewPipeline = try device.makeRenderPipelineState(descriptor: maskDescriptor)
+        self.tileContents = try TileContentTracker(device: device, queue: queue, library: library)
         self.brushEngine = try MetalBrushEngine(device: device, queue: queue, library: library)
         self.polygonRasterizer = try PolygonMaskRasterizer(device: device, queue: queue, library: library)
         self.lassoFillPipeline = try device.makeComputePipelineState(function: lassoFill)
         self.selectionEditPipeline = try device.makeComputePipelineState(function: selectionEdit)
         self.selectionBoundsPipeline = try device.makeComputePipelineState(function: selectionBounds)
-        self.paintBoundsPipeline = try device.makeComputePipelineState(function: paintBounds)
+        self.selectionDeviationPipeline = try device.makeComputePipelineState(function: selectionDeviation)
         self.emptyMask = Self.makeMaskTile(device: device, fill: 0)
         self.fullMask = Self.makeMaskTile(device: device, fill: 255)
 
@@ -231,6 +234,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         self.lassoLinePipeline = try device.makeRenderPipelineState(descriptor: lineDescriptor)
         self.page = page
         super.init()
+        tileContents.onReady = { [weak self] in self?.resolveTileContentBounds() }
         brushEngine.onTipRadius = { [weak self] id, radius in
             guard let self, self.previewStrokeID == id else { return }
             self.previewTipRadius = radius
@@ -343,6 +347,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         let result = brushEngine.finish(stroke, base: tiles, selection: selection, width: page.width, height: page.height)
         brushChanges.record(result, tiles: tiles, dirty: dirtyBounds)
         for (key, texture) in result.tiles { tiles[key] = texture }
+        tileContents.record(result.tiles, width: page.width, height: page.height)
         for (key, bounds) in result.dirtyBounds {
             dirtyBounds[key] = (dirtyBounds[key] ?? .null).union(bounds)
         }
@@ -357,6 +362,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
 
     func removeTiles(for layerID: UUID) {
         brushChanges.invalidate(layerID: layerID)
+        tileContents.invalidate(layerID: layerID)
+        tileContentBounds = tileContentBounds.filter { $0.key.layerID != layerID }
         maskThumbnailCache.removeValue(forKey: layerID)
         thumbnailCache.removeValue(forKey: layerID)
         emptyThumbnailLayers.remove(layerID)
@@ -368,6 +375,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
 
     func removeTiles(for layerID: UUID, target: LayerEditTarget) {
         brushChanges.invalidate(layerID: layerID)
+        tileContents.invalidate(layerID: layerID, target: target)
+        tileContentBounds = tileContentBounds.filter { $0.key.layerID != layerID || $0.key.target != target }
         thumbnailCache.removeValue(forKey: layerID)
         emptyThumbnailLayers.remove(layerID)
         maskThumbnailCache.removeValue(forKey: layerID)
@@ -401,6 +410,18 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     func prepareForReadback() {
         brushEngine.synchronize()
         brushChanges.resolve(tiles: &tiles, dirty: &dirtyBounds)
+        tileContents.synchronize()
+        resolveTileContentBounds()
+    }
+
+    private func resolveTileContentBounds() {
+        let layers = tileContents.resolve(tiles: &tiles, bounds: &tileContentBounds, dirty: &dirtyBounds)
+        for id in layers {
+            thumbnailCache.removeValue(forKey: id)
+            maskThumbnailCache.removeValue(forKey: id)
+            emptyThumbnailLayers.remove(id)
+        }
+        if !layers.isEmpty { view?.setNeedsDisplay() }
     }
 
     func clearSavedDirtyTiles() { dirtyBounds.removeAll(); brushChanges.invalidate() }
@@ -413,6 +434,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     func restore(_ snapshot: [TileKey: Data]) {
         brushEngine.cancel()
         brushChanges.invalidate()
+        tileContents.invalidate()
+        tileContentBounds.removeAll()
         previewStrokeID = nil
         previewTipRadius = nil
         thumbnailCache.removeAll()
@@ -437,6 +460,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             }
             tiles[key] = texture
         }
+        tileContents.record(tiles, width: page.width, height: page.height)
         view?.setNeedsDisplay()
     }
 
@@ -458,38 +482,11 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     func thumbnail(for layerID: UUID) -> UIImage? {
         if let cached = thumbnailCache[layerID] { return cached }
         if emptyThumbnailLayers.contains(layerID) { return nil }
+        prepareForReadback()
         let layerTiles = tiles.filter { $0.key.layerID == layerID && $0.key.target == .content }
-        guard !layerTiles.isEmpty, let boundsCommand = queue.makeCommandBuffer() else {
-            emptyThumbnailLayers.insert(layerID)
-            return nil
-        }
         let tileSize = CanvasConstants.tileSize
-        let initial = [UInt32(tileSize), UInt32(tileSize), 0, 0]
-        var reductions: [(TileKey, MTLBuffer)] = []
-        for (key, texture) in layerTiles {
-            guard let buffer = device.makeBuffer(bytes: initial,
-                                                  length: MemoryLayout<UInt32>.stride * 4),
-                  let encoder = boundsCommand.makeComputeCommandEncoder() else { continue }
-            encoder.setComputePipelineState(paintBoundsPipeline)
-            encoder.setTexture(texture, index: 0)
-            encoder.setBuffer(buffer, offset: 0, index: 0)
-            encoder.dispatchThreads(MTLSize(width: tileSize, height: tileSize, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
-            encoder.endEncoding()
-            reductions.append((key, buffer))
-        }
-        boundsCommand.commit()
-        boundsCommand.waitUntilCompleted()
-        guard boundsCommand.status == .completed else { return nil }
-        var bounds = CGRect.null
-        for (key, buffer) in reductions {
-            let values = buffer.contents().bindMemory(to: UInt32.self, capacity: 4)
-            guard values[0] < values[2], values[1] < values[3] else { continue }
-            bounds = bounds.union(CGRect(x: key.x * tileSize + Int(values[0]),
-                                         y: key.y * tileSize + Int(values[1]),
-                                         width: Int(values[2] - values[0]),
-                                         height: Int(values[3] - values[1])))
-        }
+        var bounds = tileContentBounds.filter { $0.key.layerID == layerID && $0.key.target == .content }
+            .values.reduce(CGRect.null) { $0.union($1) }
         bounds = bounds.intersection(CGRect(x: 0, y: 0, width: page.width, height: page.height))
         guard !bounds.isNull, !bounds.isEmpty else {
             emptyThumbnailLayers.insert(layerID)
@@ -686,7 +683,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         var newBounds: [SelectionTileKey: CGRect] =
             (mode == .replace || mode == .intersect || mode == nil) ? [:] : (old?.tileBounds ?? [:])
         guard let commandBuffer = queue.makeCommandBuffer() else { return }
-        var reductions: [(SelectionTileKey, MTLBuffer)] = []
+        var reductions: [(SelectionTileKey, MTLBuffer, MTLBuffer)] = []
         let tileSize = CanvasConstants.tileSize
         let operation: UInt32
         switch mode {
@@ -703,12 +700,13 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             let initial = [UInt32(tileSize), UInt32(tileSize), 0, 0]
             guard let boundsBuffer = device.makeBuffer(bytes: initial,
                 length: MemoryLayout<UInt32>.stride * initial.count),
+                  let deviationBuffer = device.makeBuffer(bytes: initial, length: 16),
                 let edit = commandBuffer.makeComputeCommandEncoder() else { continue }
             var uniforms = SelectionOpUniforms(
                 rect: SIMD4<Float>(Float(rectangle.minX), Float(rectangle.minY),
                                    Float(rectangle.maxX), Float(rectangle.maxY)),
                 tileOrigin: SIMD2<Float>(Float(key.x * tileSize), Float(key.y * tileSize)),
-                operation: operation, padding: masks == nil ? 0 : 1)
+                operation: operation, padding: (masks == nil ? 0 : 1) | (oldDefault == 255 ? 2 : 0))
             edit.setComputePipelineState(selectionEditPipeline)
             edit.setTexture(source, index: 0)
             edit.setTexture(output, index: 1)
@@ -724,14 +722,30 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                 bounds.dispatchThreads(MTLSize(width: tileSize, height: tileSize, depth: 1),
                                        threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
                 bounds.endEncoding()
-                newTiles[key] = output
-                reductions.append((key, boundsBuffer))
+                if let deviations = commandBuffer.makeComputeCommandEncoder() {
+                    var defaultCoverage = UInt32(newDefault)
+                    deviations.setComputePipelineState(selectionDeviationPipeline)
+                    deviations.setTexture(output, index: 0)
+                    deviations.setBuffer(deviationBuffer, offset: 0, index: 0)
+                    deviations.setBytes(&defaultCoverage, length: 4, index: 1)
+                    deviations.dispatchThreads(MTLSize(width: tileSize, height: tileSize, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                    deviations.endEncoding()
+                    newTiles[key] = output
+                    reductions.append((key, boundsBuffer, deviationBuffer))
+                }
             }
         }
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         guard commandBuffer.status == .completed else { return }
-        for (key, buffer) in reductions {
+        for (key, buffer, deviationBuffer) in reductions {
+            let deviation = deviationBuffer.contents().bindMemory(to: UInt32.self, capacity: 4)
+            if deviation[0] >= deviation[2] || deviation[1] >= deviation[3] {
+                newTiles.removeValue(forKey: key)
+                newBounds.removeValue(forKey: key)
+                continue
+            }
             let values = buffer.contents().bindMemory(to: UInt32.self, capacity: 4)
             if values[0] < values[2], values[1] < values[3] {
                 newBounds[key] = CGRect(x: key.x * tileSize + Int(values[0]),
@@ -809,6 +823,9 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                 width: Int(bounds[2] - bounds[0]), height: Int(bounds[3] - bounds[1]))
             dirtyBounds[key] = (dirtyBounds[key] ?? .null).union(changed)
         }
+        tileContents.record(Dictionary(uniqueKeysWithValues: pending.compactMap { key, output, _ in
+            tiles[key].map { current in current === output ? (key, output) : nil } ?? nil
+        }), width: page.width, height: page.height)
         thumbnailCache.removeValue(forKey: clear.layerID)
         emptyThumbnailLayers.remove(clear.layerID)
         maskThumbnailCache.removeValue(forKey: clear.layerID)
@@ -860,6 +877,9 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                                  width: Int(values[2] - values[0]), height: Int(values[3] - values[1]))
             dirtyBounds[key] = (dirtyBounds[key] ?? .null).union(changed)
         }
+        tileContents.record(Dictionary(uniqueKeysWithValues: pending.compactMap { key, output, _ in
+            tiles[key].map { current in current === output ? (key, output) : nil } ?? nil
+        }), width: page.width, height: page.height)
         maskThumbnailCache.removeValue(forKey: fill.layerID)
         thumbnailCache.removeValue(forKey: fill.layerID)
         emptyThumbnailLayers.remove(fill.layerID)
@@ -1236,9 +1256,13 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                         if selection.defaultCoverage == 0 &&
                            (showsSelectionTint ? selection.tileBounds[key] == nil : !selection.outlineKeys.contains(key)) { continue }
                         let origin = SIMD2<Float>(Float(x * size), Float(y * size))
-                        var quad = QuadUniforms(origin: origin,
-                            size: SIMD2<Float>(Float(min(size, page.width - x * size)),
-                                               Float(min(size, page.height - y * size))),
+                        let gutter = showsSelectionTint ? Float(0) : 0.75 / max(zoom, 0.000001)
+                        let left = x == 0 ? gutter : 0, top = y == 0 ? gutter : 0
+                        let right = (x + 1) * size >= page.width ? gutter : 0
+                        let bottom = (y + 1) * size >= page.height ? gutter : 0
+                        var quad = QuadUniforms(origin: origin - SIMD2(left, top),
+                            size: SIMD2<Float>(Float(min(size, page.width - x * size)) + left + right,
+                                               Float(min(size, page.height - y * size)) + top + bottom),
                             viewport: viewport, zoom: zoom, rotation: rotation, pan: pan)
                         var uniforms = SelectionOutlineUniforms(
                             tileOrigin: origin,

@@ -18,8 +18,11 @@ kernel void editSelection(texture2d<float, access::read> previous [[texture(0)]]
     float2 pixel = u.tileOrigin + float2(gid);
     float overlapX = max(0.0, min(pixel.x + 1.0, u.rect.z) - max(pixel.x, u.rect.x));
     float overlapY = max(0.0, min(pixel.y + 1.0, u.rect.w) - max(pixel.y, u.rect.y));
-    float value = u.padding == 1 ? incoming.read(gid).r : overlapX * overlapY;
-    if (u.operation == 1) value = max(old, value);
+    float value = (u.padding & 1u) != 0 ? incoming.read(gid).r : overlapX * overlapY;
+    // With a selected default, edits fill holes; never treat the incoming mask
+    // as a hole mask. All stored and incoming texels are actual coverage.
+    if (u.operation == 1) value = (u.padding & 2u) != 0
+        ? 1.0 - min(1.0 - old, 1.0 - value) : max(old, value);
     if (u.operation == 2) value = old * (1.0 - value);
     if (u.operation == 3) value = old * value;
     if (u.operation == 4) value = 1.0 - old;
@@ -37,11 +40,36 @@ kernel void selectionTileBounds(texture2d<float, access::read> mask [[texture(0)
     atomic_fetch_max_explicit(&bounds[3], gid.y + 1, memory_order_relaxed);
 }
 
+kernel void selectionTileDeviationBounds(texture2d<float, access::read> mask [[texture(0)]],
+                                         device atomic_uint *bounds [[buffer(0)]],
+                                         constant uint &defaultCoverage [[buffer(1)]], uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= mask.get_width() || gid.y >= mask.get_height()) return;
+    if (abs(mask.read(gid).r - float(defaultCoverage) / 255.0) < 0.5 / 255.0) return;
+    atomic_fetch_min_explicit(&bounds[0], gid.x, memory_order_relaxed);
+    atomic_fetch_min_explicit(&bounds[1], gid.y, memory_order_relaxed);
+    atomic_fetch_max_explicit(&bounds[2], gid.x + 1, memory_order_relaxed);
+    atomic_fetch_max_explicit(&bounds[3], gid.y + 1, memory_order_relaxed);
+}
+
 kernel void paintTileBounds(texture2d<float, access::read> tile [[texture(0)]],
                             device atomic_uint *bounds [[buffer(0)]],
                             uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= tile.get_width() || gid.y >= tile.get_height()) return;
     if (tile.read(gid).a <= 0.0) return;
+    atomic_fetch_min_explicit(&bounds[0], gid.x, memory_order_relaxed);
+    atomic_fetch_min_explicit(&bounds[1], gid.y, memory_order_relaxed);
+    atomic_fetch_max_explicit(&bounds[2], gid.x + 1, memory_order_relaxed);
+    atomic_fetch_max_explicit(&bounds[3], gid.y + 1, memory_order_relaxed);
+}
+
+// Occupancy is alpha for paint, and deviation from implicit white for a mask.
+kernel void tileContentBounds(texture2d<float, access::read> tile [[texture(0)]],
+                              constant uint &isMask [[buffer(0)]],
+                              device atomic_uint *bounds [[buffer(1)]],
+                              constant uint2 &validSize [[buffer(2)]], uint2 gid [[thread_position_in_grid]]) {
+    if (any(gid >= validSize)) return;
+    float4 value = tile.read(gid);
+    if (isMask != 0 ? value.r >= 1.0 : value.a <= 0.0) return;
     atomic_fetch_min_explicit(&bounds[0], gid.x, memory_order_relaxed);
     atomic_fetch_min_explicit(&bounds[1], gid.y, memory_order_relaxed);
     atomic_fetch_max_explicit(&bounds[2], gid.x + 1, memory_order_relaxed);
@@ -149,6 +177,25 @@ fragment float4 selectionOutlineFragment(QuadOutput in [[stage_in]],
     constant SelectionOutlineUniforms &u [[buffer(0)]]) {
     int2 pixel = int2(floor(in.canvasPosition));
     int2 local = pixel - int2(u.tileOrigin);
+    // A canvas edge must be visible even when its boundary pixel is smaller
+    // than one screen pixel. Sample the inside edge, then draw around its true
+    // geometric location; the quad includes a small exterior gutter.
+    float2 p = in.canvasPosition;
+    float padding = 0.75 / max(u.zoom, 0.000001);
+    int2 limit = int2(u.canvasSize) - 1;
+    if (p.x >= -padding && p.y >= -padding && p.x <= u.canvasSize.x + padding && p.y <= u.canvasSize.y + padding) {
+        int2 edgePixel = clamp(pixel, int2(0), limit);
+        if (min(abs(p.x), abs(p.x - u.canvasSize.x)) <= padding ||
+            min(abs(p.y), abs(p.y - u.canvasSize.y)) <= padding) {
+            if (abs(p.x) <= padding) edgePixel.x = 0;
+            else if (abs(p.x - u.canvasSize.x) <= padding) edgePixel.x = limit.x;
+            if (abs(p.y) <= padding) edgePixel.y = 0;
+            else if (abs(p.y - u.canvasSize.y) <= padding) edgePixel.y = limit.y;
+            int2 edgeLocal = edgePixel - int2(u.tileOrigin);
+            if (all(edgeLocal >= 0) && all(edgeLocal < 256) && center.read(uint2(edgeLocal)).r > 0.5)
+                return marchingAntColor(in.position.xy, u.phase);
+        }
+    }
     if (local.x < 0 || local.y < 0 || local.x >= 256 || local.y >= 256) discard_fragment();
     bool inside = selectionValue(pixel, local, 0, u, center, left, right, top, bottom) > 0.5;
     float2 fraction = in.canvasPosition - float2(pixel);

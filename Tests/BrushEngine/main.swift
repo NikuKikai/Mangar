@@ -126,6 +126,106 @@ struct BrushEngineChecks {
         let fillRecord = BucketFillCommand(layerID: layer, spans: closed, brush: MangaBrushes.configuration(.gPen), target: .content, erases: false)
         let restoredFill = try JSONDecoder().decode(BucketFillCommand.self, from: JSONEncoder().encode(fillRecord))
         check(restoredFill.spans == closed, "Bucket command freezes compact region for replay")
+        func awaitGPU(_ command: MTLCommandBuffer) async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                command.addCompletedHandler { _ in continuation.resume() }; command.commit()
+            }
+            check(command.status == .completed, "Selection GPU operation completed")
+        }
+        func selectionTexture(_ values: [UInt8]) -> MTLTexture {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat:.r8Unorm,width:256,height:256,mipmapped:false)
+            d.storageMode = .shared; d.usage = [.shaderRead,.shaderWrite]
+            let t = device.makeTexture(descriptor:d)!
+            values.withUnsafeBytes { t.replace(region:MTLRegionMake2D(0,0,256,256),mipmapLevel:0,withBytes:$0.baseAddress!,bytesPerRow:256) }
+            return t
+        }
+        struct SelectionEditValues { var rect: SIMD4<Float>; var origin = SIMD2<Float>(0,0); var operation: UInt32; var flags: UInt32 }
+        let editSelectionPipeline = try await device.makeComputePipelineState(function:library.makeFunction(name:"editSelection")!)
+        func editCoverage(_ previous: MTLTexture, operation: UInt32, defaultValue: UInt8,
+                          rect: SIMD4<Float> = .zero, incoming: MTLTexture? = nil) async -> MTLTexture {
+            let out = selectionTexture([UInt8](repeating:0,count:256*256))
+            let c = queue.makeCommandBuffer()!, e = c.makeComputeCommandEncoder()!
+            var u = SelectionEditValues(rect:rect,operation:operation,flags:(incoming == nil ? 0 : 1) | (defaultValue == 255 ? 2 : 0))
+            e.setComputePipelineState(editSelectionPipeline);e.setTexture(previous,index:0);e.setTexture(out,index:1);e.setTexture(incoming ?? out,index:2)
+            e.setBytes(&u,length:MemoryLayout<SelectionEditValues>.stride,index:0)
+            e.dispatchThreads(MTLSize(width:256,height:256,depth:1),threadsPerThreadgroup:MTLSize(width:16,height:16,depth:1));e.endEncoding()
+            await awaitGPU(c);return out
+        }
+        let zeroSelection = selectionTexture([UInt8](repeating:0,count:256*256))
+        let selectedRect = await editCoverage(zeroSelection,operation:0,defaultValue:0,rect:SIMD4(32,32,96,96))
+        let invertedRect = await editCoverage(selectedRect,operation:4,defaultValue:0)
+        let filledHole = await editCoverage(invertedRect,operation:1,defaultValue:255,rect:SIMD4(40,40,80,80))
+        let inverseValues = bytes(invertedRect), unionValues = bytes(filledHole)
+        check(unionValues[50*256+50] == 255 && inverseValues[50*256+50] == 0 && unionValues[10*256+10] == 255,
+            "Shift rectangle after invert fills the hole, preserving selected exterior")
+        check(zip(inverseValues,unionValues).allSatisfy { $1 >= $0 }, "Shift union after invert never subtracts coverage")
+        let removedAfterInvert = await editCoverage(invertedRect,operation:2,defaultValue:255,rect:SIMD4(0,0,20,20))
+        check(bytes(removedAfterInvert)[10*256+10] == 0 && bytes(removedAfterInvert)[100*256+100] == 255,
+            "Option subtract after invert removes only incoming coverage")
+        var partialIncoming = [UInt8](repeating:0,count:256*256)
+        for y in 40..<80 { for x in 40..<80 { partialIncoming[y*256+x] = 128 } }
+        let lassoUnion = await editCoverage(invertedRect,operation:1,defaultValue:255,incoming:selectionTexture(partialIncoming))
+        check(bytes(lassoUnion)[50*256+50] == 128 && bytes(lassoUnion)[10*256+10] == 255,
+            "Lasso after invert reads the incoming R8 mask with selected-default flags")
+        let doubleInvert = await editCoverage(invertedRect,operation:4,defaultValue:255)
+        check(bytes(doubleInvert) == bytes(selectedRect), "Double selection inversion restores original coverage")
+        let deviationPipeline = try await device.makeComputePipelineState(function:library.makeFunction(name:"selectionTileDeviationBounds")!)
+        func deviations(_ t:MTLTexture, defaultValue:UInt32) async -> [UInt32] {
+            let c = queue.makeCommandBuffer()!, e = c.makeComputeCommandEncoder()!
+            let initial:[UInt32] = [256,256,0,0];let b = device.makeBuffer(bytes:initial,length:16)!
+            var d = defaultValue
+            e.setComputePipelineState(deviationPipeline);e.setTexture(t,index:0);e.setBuffer(b,offset:0,index:0);e.setBytes(&d,length:4,index:1)
+            e.dispatchThreads(MTLSize(width:256,height:256,depth:1),threadsPerThreadgroup:MTLSize(width:16,height:16,depth:1));e.endEncoding()
+            await awaitGPU(c)
+            return Array(UnsafeBufferPointer(start:b.contents().bindMemory(to:UInt32.self,capacity:4),count:4))
+        }
+        let zeroException = await deviations(zeroSelection,defaultValue:255)
+        let fullSelection = selectionTexture([UInt8](repeating:255,count:256*256))
+        let fullException = await deviations(fullSelection,defaultValue:255)
+        check(zeroException == [0,0,256,256] && fullException == [256,256,0,0],
+            "Selected-default keeps zero exceptions and retires all-default tiles")
+
+        let contentInspector = try TileContentTracker(device:device,queue:queue,library:library)
+        let contentDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat:.rgba8Unorm,width:256,height:256,mipmapped:false)
+        contentDesc.storageMode = .shared;contentDesc.usage = [.shaderRead,.shaderWrite]
+        let twoDots = device.makeTexture(descriptor:contentDesc)!
+        var dotValues = [UInt8](repeating:0,count:256*256*4)
+        dotValues[(10*256+10)*4+3] = 255;dotValues[(200*256+200)*4+3] = 255
+        dotValues.withUnsafeBytes { twoDots.replace(region:MTLRegionMake2D(0,0,256,256),mipmapLevel:0,withBytes:$0.baseAddress!,bytesPerRow:1024) }
+        var occupied:[TileKey:MTLTexture] = [key:twoDots], occupiedBounds:[TileKey:CGRect] = [:], occupancyDirty:[TileKey:CGRect] = [:]
+        contentInspector.record(occupied,width:600,height:600);contentInspector.synchronize()
+        contentInspector.resolve(tiles:&occupied,bounds:&occupiedBounds,dirty:&occupancyDirty)
+        check(occupiedBounds[key] == CGRect(x:10,y:10,width:191,height:191), "Tile content bounding box spans actual alpha")
+        var eraseDot = dot(.binaryPen);eraseDot.tool = .eraser;eraseDot.brush.size = 32
+        eraseDot.samples = [StrokeSample(x:200,y:200,pressure:1)]
+        let erasedFar = paint(eraseDot,base:occupied);engine.synchronize();occupied.merge(erasedFar.tiles) { _,new in new }
+        contentInspector.record(erasedFar.tiles,width:600,height:600);contentInspector.synchronize()
+        contentInspector.resolve(tiles:&occupied,bounds:&occupiedBounds,dirty:&occupancyDirty)
+        check(occupiedBounds[key] == CGRect(x:10,y:10,width:1,height:1), "Erasing shrinks actual content bounding box")
+        eraseDot.id = UUID();eraseDot.samples = [StrokeSample(x:10,y:10,pressure:1)]
+        let erasedLast = paint(eraseDot,base:occupied);engine.synchronize();occupied.merge(erasedLast.tiles) { _,new in new }
+        contentInspector.record(erasedLast.tiles,width:600,height:600);contentInspector.synchronize()
+        contentInspector.resolve(tiles:&occupied,bounds:&occupiedBounds,dirty:&occupancyDirty)
+        check(occupied[key] == nil && occupiedBounds[key] == nil && occupancyDirty[key] != nil,
+            "Erasing final pixel retires texture and keeps deletion dirty")
+        let occupancyMaskKey = TileKey(layerID:layer,x:0,y:0,target:.mask)
+        var maskTiles:[TileKey:MTLTexture] = [occupancyMaskKey:zeroSelection]
+        contentInspector.record(maskTiles,width:600,height:600);contentInspector.synchronize()
+        contentInspector.resolve(tiles:&maskTiles,bounds:&occupiedBounds,dirty:&occupancyDirty)
+        check(maskTiles[occupancyMaskKey] != nil && occupiedBounds[occupancyMaskKey] == CGRect(x:0,y:0,width:256,height:256),
+            "Black mask is meaningful, not an empty tile")
+        maskTiles[occupancyMaskKey] = fullSelection
+        contentInspector.record(maskTiles,width:600,height:600);contentInspector.synchronize()
+        contentInspector.resolve(tiles:&maskTiles,bounds:&occupiedBounds,dirty:&occupancyDirty)
+        check(maskTiles[occupancyMaskKey] == nil, "White mask returns to implicit default and releases texture")
+        occupied = [key:twoDots]
+        let emptyPaint = device.makeTexture(descriptor:contentDesc)!
+        let emptyPixels = [UInt8](repeating:0,count:256*256*4)
+        emptyPixels.withUnsafeBytes { emptyPaint.replace(region:MTLRegionMake2D(0,0,256,256),mipmapLevel:0,withBytes:$0.baseAddress!,bytesPerRow:1024) }
+        contentInspector.record([key:emptyPaint],width:600,height:600);contentInspector.synchronize()
+        contentInspector.resolve(tiles:&occupied,bounds:&occupiedBounds,dirty:&occupancyDirty)
+        check(occupied[key] === twoDots, "Stale empty measurement cannot remove a newer published texture")
+
         check(MemoryLayout<BrushGPUInput>.stride == 32 && MemoryLayout<BrushGPUUniforms>.stride == 224, "Metal ABI")
         let lowG = area(paint(dot(.gPen, pressure: 0.15)))
         let highG = area(paint(dot(.gPen)))
@@ -347,6 +447,41 @@ struct BrushEngineChecks {
         let tintBytes = bytes(tintOut)
         let observedTint = [32,96,160,224].map { Int(tintBytes[(128*256+$0)*4+3]) }
         check(observedTint == [0,64,128,255], "Selection tint renders continuous R8 values including below one half")
+        let antsPipelineDesc = MTLRenderPipelineDescriptor()
+        antsPipelineDesc.vertexFunction = library.makeFunction(name:"tileVertex")
+        antsPipelineDesc.fragmentFunction = library.makeFunction(name:"selectionOutlineFragment")
+        antsPipelineDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
+        let antsPipeline = try await device.makeRenderPipelineState(descriptor:antsPipelineDesc)
+        func renderCanvasAnts(_ selected:MTLTexture) async -> [UInt8] {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat:.bgra8Unorm,width:128,height:128,mipmapped:false)
+            d.storageMode = .shared;d.usage = .renderTarget
+            let t = device.makeTexture(descriptor:d)!
+            let pass = MTLRenderPassDescriptor();pass.colorAttachments[0].texture = t
+            pass.colorAttachments[0].loadAction = .clear;pass.colorAttachments[0].storeAction = .store
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(0,0,0,0)
+            let c = queue.makeCommandBuffer()!, e = c.makeRenderCommandEncoder(descriptor:pass)!
+            var q = TintQuad(), u = TintUniforms()
+            let zoom:Float = 0.4, gutter:Float = 0.75/zoom
+            q.origin = SIMD2(-gutter,-gutter);q.size = SIMD2(100+2*gutter,80+2*gutter)
+            q.viewport = SIMD2(128,128);q.zoom = zoom;q.pan = SIMD2(20.3,25.4)
+            u.canvas = SIMD2(100,80);u.zoom = zoom
+            e.setRenderPipelineState(antsPipeline);e.setVertexBytes(&q,length:MemoryLayout<TintQuad>.stride,index:0)
+            e.setFragmentBytes(&u,length:MemoryLayout<TintUniforms>.stride,index:0)
+            for index in 0..<5 { e.setFragmentTexture(selected,index:index) }
+            e.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:6);e.endEncoding()
+            await awaitGPU(c)
+            var pixels = [UInt8](repeating:0,count:128*128*4)
+            pixels.withUnsafeMutableBytes { t.getBytes($0.baseAddress!,bytesPerRow:128*4,from:MTLRegionMake2D(0,0,128,128),mipmapLevel:0) }
+            return pixels
+        }
+        let canvasAnts = await renderCanvasAnts(fullSelection)
+        check([(20,40),(60,40),(40,25),(40,57)].allSatisfy { canvasAnts[($0.1*128+$0.0)*4+3] == 255 },
+            "Canvas edge ants remain visible below one-pixel zoom on all four edges")
+        check(canvasAnts[(40*128+40)*4+3] == 0, "Full selection has no internal outline")
+        let noCanvasAnts = await renderCanvasAnts(zeroSelection)
+        check(stride(from:3,to:noCanvasAnts.count,by:4).allSatisfy { noCanvasAnts[$0] == 0 },
+            "Unselected canvas edge has no ants")
+
         let selectionKey = SelectionTileKey(x: 0, y: 0)
         let selection = SelectionSnapshot(defaultCoverage: 0, tiles: [selectionKey: mask],
             tileBounds: [selectionKey: CGRect(x: 0, y: 0, width: 256, height: 256)],

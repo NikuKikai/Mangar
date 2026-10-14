@@ -2,7 +2,7 @@ import Foundation
 
 enum BrushDeposition: UInt32, Codable, CaseIterable {
     case pigment, solidInk
-    var name: String { self == .pigment ? "颜料" : "墨水" }
+    var name: String { self == .pigment ? L10n.text("颜料") : L10n.text("墨水") }
 }
 
 /// User-editable rendering behavior; preset identity is only a source of defaults.

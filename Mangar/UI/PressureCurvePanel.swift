@@ -1,34 +1,36 @@
 import SwiftUI
 
 struct PressureCurvePanel: View {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     @Binding var curve: PressureCurve
     let close: () -> Void
 
     var body: some View {
+        let _ = interfaceLanguage
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("全局压感曲线").font(.system(size: 12, weight: .semibold))
+                Text(L10n.text("全局压感曲线")).font(.system(size: 12, weight: .semibold))
                 Spacer(minLength: 4)
                 Button(action: close) {
                     Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
                         .frame(width: 20, height: 20)
                 }
-                .accessibilityLabel("关闭压感曲线面板")
+                .accessibilityLabel(L10n.text("关闭压感曲线面板"))
             }
-            Text("输出压感").font(.system(size: 9)).foregroundStyle(.secondary)
+            Text(L10n.text("输出压感")).font(.system(size: 9)).foregroundStyle(.secondary)
             PressureCurveGraph(curve: $curve)
                 .frame(height: 160)
                 .padding(5)
             HStack {
-                Text("0%"); Spacer(); Text("输入压感"); Spacer(); Text("100%")
+                Text("0%"); Spacer(); Text(L10n.text("输入压感")); Spacer(); Text("100%")
             }
             .font(.system(size: 9)).foregroundStyle(.secondary)
             HStack(spacing: 4) {
-                preset("线性", curve: .linear)
-                preset("轻压", curve: .soft)
-                preset("重压", curve: .firm)
+                preset(L10n.text("线性"), curve: .linear)
+                preset(L10n.text("轻压"), curve: .soft)
+                preset(L10n.text("重压"), curve: .firm)
             }
-            Text("上下拖动控制点；设置立即生效并自动保存。")
+            Text(L10n.text("上下拖动控制点；设置立即生效并自动保存。"))
                 .font(.system(size: 9)).foregroundStyle(.secondary)
         }
         .buttonStyle(ImmediateButtonStyle())
@@ -51,10 +53,12 @@ struct PressureCurvePanel: View {
 }
 
 private struct PressureCurveGraph: View {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     @Binding var curve: PressureCurve
     @State private var draggingPoint: Int?
 
     var body: some View {
+        let _ = interfaceLanguage
             GeometryReader { geometry in
                 let size = geometry.size
                 ZStack {
@@ -107,7 +111,7 @@ private struct PressureCurveGraph: View {
                     }
                     .onEnded { _ in draggingPoint = nil })
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("压感曲线，拖动控制点上下调整")
+                .accessibilityLabel(L10n.text("压感曲线，拖动控制点上下调整"))
             }
     }
 }

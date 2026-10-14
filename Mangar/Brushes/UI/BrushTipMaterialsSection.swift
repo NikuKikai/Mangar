@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 /// Inline controls for the current brush's tip images.
 struct BrushTipMaterialsSection: View {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     @Binding var brush: BrushConfiguration
     let importTips: ([URL], BrushTipChannel) -> Void
     let reportError: (String) -> Void
@@ -10,14 +11,15 @@ struct BrushTipMaterialsSection: View {
     @State private var channel: BrushTipChannel = .alpha
 
     var body: some View {
+        let _ = interfaceLanguage
         VStack(alignment: .leading, spacing: 3) {
             HStack {
-                Text("笔尖素材 · \(brush.stampSettings.assetIDs.count)/16")
+                Text(L10n.format("笔尖素材 · %@/16", "\(brush.stampSettings.assetIDs.count)"))
                 Spacer()
-                Button("圆尖") { brush.stampSettings.assetIDs = [] }
+                Button(L10n.text("圆尖")) { brush.stampSettings.assetIDs = [] }
             }.frame(height: 18)
             HStack(spacing: 3) {
-                Text("导入通道").foregroundStyle(.secondary)
+                Text(L10n.text("导入通道")).foregroundStyle(.secondary)
                 ForEach(BrushTipChannel.allCases, id: \.self) { item in
                     Button { channel = item } label: {
                         Text(item.name).frame(maxWidth: .infinity).frame(height: 18)
@@ -47,7 +49,7 @@ struct BrushTipMaterialsSection: View {
                 }
             }.frame(height: 60)
             }
-            Text("图片保留原比例；大小以最长边计。硬度仅用于圆尖。")
+            Text(L10n.text("图片保留原比例；大小以最长边计。硬度仅用于圆尖。"))
                 .font(.system(size: 9)).foregroundStyle(.secondary)
         }
         .font(.system(size: 10))

@@ -3,6 +3,7 @@ import UIKit
 
 /// Click performs the action; release below the button reveals its auxiliary controls.
 struct SlideOutButton: UIViewRepresentable {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     let icon: String
     let label: String
     let isOn: Bool
@@ -12,6 +13,7 @@ struct SlideOutButton: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SlideOutButtonView { SlideOutButtonView() }
     func updateUIView(_ view: SlideOutButtonView, context: Context) {
+        let _ = interfaceLanguage
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
@@ -39,7 +41,7 @@ final class SlideOutButtonView: UIControl {
         addSubview(image)
         addSubview(indicator)
         isAccessibilityElement = true
-        accessibilityCustomActions = [UIAccessibilityCustomAction(name: "展开参数", target: self,
+        accessibilityCustomActions = [UIAccessibilityCustomAction(name: L10n.text("展开参数"), target: self,
             selector: #selector(accessibilityExpand))]
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -47,9 +49,11 @@ final class SlideOutButtonView: UIControl {
                    enabled: Bool, action: @escaping () -> Void, expand: @escaping () -> Void) {
         image.image = UIImage(systemName: icon,
             withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .regular))
+        accessibilityCustomActions = [UIAccessibilityCustomAction(name: L10n.text("展开参数"), target: self, selector: #selector(accessibilityExpand))]
         accessibilityLabel = label
-        accessibilityHint = "单击开关；按住向下移出按钮并松开展开参数"
-        accessibilityValue = "\(isOn ? "已启用" : "未启用")，\(isExpanded ? "参数已展开" : "参数已收起")"
+        accessibilityHint = L10n.text("单击开关；按住向下移出按钮并松开展开参数")
+        accessibilityValue = L10n.format("control.state", isOn ? L10n.text("已启用") : L10n.text("未启用"),
+            isExpanded ? L10n.text("参数已展开") : L10n.text("参数已收起"))
         accessibilityTraits = isOn ? [.button, .selected] : [.button]
         isSelected = isOn
         expanded = isExpanded

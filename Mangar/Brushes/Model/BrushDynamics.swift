@@ -4,7 +4,7 @@ enum BrushParameter: String, Codable, CaseIterable, Identifiable {
     case size, flow, opacity
     var id: String { rawValue }
     var name: String {
-        switch self { case .size: "大小"; case .flow: "流量 / 出墨量"; case .opacity: "不透明度" }
+        switch self { case .size: L10n.text("大小"); case .flow: L10n.text("流量 / 出墨量"); case .opacity: L10n.text("不透明度") }
     }
     var outputLimit: Double { self == .size ? 3 : 1 }
 }
@@ -13,7 +13,7 @@ enum BrushDynamicInput: String, Codable, CaseIterable, Identifiable {
     case pressure, speed, tilt
     var id: String { rawValue }
     var name: String {
-        switch self { case .pressure: "压力"; case .speed: "速度"; case .tilt: "倾斜" }
+        switch self { case .pressure: L10n.text("压力"); case .speed: L10n.text("速度"); case .tilt: L10n.text("倾斜") }
     }
 }
 

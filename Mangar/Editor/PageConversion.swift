@@ -11,8 +11,8 @@ enum PageConversion {
         case incompatible, tooLarge
         var errorDescription: String? {
             switch self {
-            case .incompatible: "只能合并尺寸、分辨率和余量相同的两个单页。"
-            case .tooLarge: "合并后的画布超出 16384 px 上限。"
+            case .incompatible: L10n.text("只能合并尺寸、分辨率和余量相同的两个单页。")
+            case .tooLarge: L10n.text("合并后的画布超出 16384 px 上限。")
             }
         }
     }
@@ -30,12 +30,12 @@ enum PageConversion {
         let width = right.page.width + content
         guard width <= 16384 else { throw Failure.tooLarge }
         rLayout?.pageSpan = 2
-        var output = ConvertedPage(page: PageRecord(name: "对开页", width: width,
+        var output = ConvertedPage(page: PageRecord(name: L10n.text("对开页"), width: width,
             height: right.page.height, comicLayout: rLayout, isSpread: true, layers: []), tiles: [:])
         append(left, clip: CGRect(x: 0, y: 0, width: margin + content, height: left.page.height),
-               offset: 0, folder: "左页", to: &output)
+               offset: 0, folder: L10n.text("左页"), to: &output)
         append(right, clip: CGRect(x: margin, y: 0, width: right.page.width - margin,
-                                  height: right.page.height), offset: content, folder: "右页", to: &output)
+                                  height: right.page.height), offset: content, folder: L10n.text("右页"), to: &output)
         return output
     }
 
@@ -46,7 +46,7 @@ enum PageConversion {
         let width = source.page.width - content
         // Overlapping crops retain the artwork in the new inner margins.
         return [content, 0].map { origin in
-            var output = ConvertedPage(page: PageRecord(name: origin == 0 ? "左页" : "右页",
+            var output = ConvertedPage(page: PageRecord(name: origin == 0 ? L10n.text("左页") : L10n.text("右页"),
                 width: width, height: source.page.height, comicLayout: layout,
                 isSpread: false, layers: []), tiles: [:])
             append(source, clip: CGRect(x: origin, y: 0, width: width, height: source.page.height),

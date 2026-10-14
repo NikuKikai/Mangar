@@ -22,9 +22,9 @@ enum BrushResourceError: LocalizedError {
     case invalidTip, missingTip, invalidResource
     var errorDescription: String? {
         switch self {
-        case .invalidTip: "笔尖素材无效或完全透明（最长边上限 1024）。"
-        case .missingTip: "笔尖素材缺失或损坏，未开始绘画。"
-        case .invalidResource: "笔刷资源缺失或损坏。"
+        case .invalidTip: L10n.text("笔尖素材无效或完全透明（最长边上限 1024）。")
+        case .missingTip: L10n.text("笔尖素材缺失或损坏，未开始绘画。")
+        case .invalidResource: L10n.text("笔刷资源缺失或损坏。")
         }
     }
 }

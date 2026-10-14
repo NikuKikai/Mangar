@@ -19,3 +19,7 @@
 新增水彩工具组及「水彩洗染笔」。笔刷参数中的「媒介」可选择普通、油彩、水彩，湿笔可调拾色量、混色强度、颜料量和携色距离，水彩另有含水量、颗粒强度与边缘积色。颜料量为 0 可携带当前图层已有颜色；每笔重新装载颜料。混色读取本笔开始前的当前图层，透明区域不当成黑色；没有跨图层合成取样。水彩是确定性的洗染近似，不模拟笔后流体扩散或真实纸张含水量。参考 [ADR 0009](docs/adr/0009-wet-paint-and-pigment-mixing.md) 和 [Spectral.js MIT 授权记录](docs/third-party/spectral-mixing.md)。
 
 选区存在时，topbar 的工具属性左侧可切换蓝色连续覆盖率观察、反转或清除选区。油漆桶参考当前编辑图层或蒙版，可设置容差与闭合间隙，并支持选区和透明色。图层曲线按钮紧邻网点按钮；点击启用、下滑展开参数。RGB 总曲线及独立通道实时预览，参数区与网点互斥，两个效果可同时启用。详见 [ADR 0011](docs/adr/0011-selection-inspection-bucket-and-layer-curves.md)。
+
+界面支持中文、日文、英文，默认跟随系统或 iPad 设置中的 App 语言，也可在应用设定中指定；不改写已有项目和图层名称。翻译集中于 `Mangar/Localization/Localizable.xcstrings`。构建后执行 `Tests/Localization/run.sh` 检查三语资源和动态文本；详见 [ADR 0012](docs/adr/0012-system-language-localization.md)。
+
+编辑菜单或项目管理右上角菜单 →「应用设定」可立即切换语言，也可选择「跟随系统」。设定自动保存，当前项目保持打开。

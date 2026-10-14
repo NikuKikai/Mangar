@@ -127,6 +127,6 @@ final class BrushResourceStore {
     }
     private func cleaned(_ name: String) -> String {
         let value = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
-        return value.isEmpty ? "自定义笔刷" : value
+        return value.isEmpty ? L10n.text("自定义笔刷") : value
     }
 }

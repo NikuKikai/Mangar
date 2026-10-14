@@ -17,12 +17,12 @@ enum BrushPresetID: String, Codable, CaseIterable {
     }
     var name: String {
         switch self {
-        case .pencil: "铅笔"
-        case .gPen: "G 笔"
-        case .technicalPen: "针管笔"
-        case .binaryPen: "二值笔"
-        case .oilFlat: "平头油画笔"
-        case .watercolorWash: "水彩洗染笔"
+        case .pencil: L10n.text("铅笔")
+        case .gPen: L10n.text("G 笔")
+        case .technicalPen: L10n.text("针管笔")
+        case .binaryPen: L10n.text("二值笔")
+        case .oilFlat: L10n.text("平头油画笔")
+        case .watercolorWash: L10n.text("水彩洗染笔")
         }
     }
 }
@@ -31,9 +31,9 @@ enum BrushAccumulation: UInt32, Codable, CaseIterable {
     case flat, flow, buildUp
     var name: String {
         switch self {
-        case .flat: "平涂"
-        case .flow: "流量"
-        case .buildUp: "叠加"
+        case .flat: L10n.text("平涂")
+        case .flow: L10n.text("流量")
+        case .buildUp: L10n.text("叠加")
         }
     }
 }

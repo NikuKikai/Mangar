@@ -3,6 +3,7 @@ import UIKit
 
 /// A compact property chip shared by numeric scrubbing and drag-to-select menus.
 struct VerticalDragProperty: UIViewRepresentable {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     enum Value {
         case number(Double, ClosedRange<Double>, pointsPerUnit: Double)
         case choice(Int, [String])
@@ -18,6 +19,7 @@ struct VerticalDragProperty: UIViewRepresentable {
 
     func makeUIView(context: Context) -> VerticalPropertyView { VerticalPropertyView() }
     func updateUIView(_ view: VerticalPropertyView, context: Context) {
+        let _ = interfaceLanguage
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
@@ -75,7 +77,7 @@ final class VerticalPropertyView: UIView, UIGestureRecognizerDelegate {
         } else { accessibilityValue = text }
         self.value = value
         onBegin = begin; onChange = change; onEnd = end
-        accessibilityHint = "按住并上下拖动以调整，松开确认"
+        accessibilityHint = L10n.text("按住并上下拖动以调整，松开确认")
     }
     @objc private func dragged(_ gesture: UIPanGestureRecognizer) {
         switch gesture.state {

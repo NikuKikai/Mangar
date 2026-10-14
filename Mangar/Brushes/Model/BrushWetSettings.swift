@@ -2,7 +2,7 @@ import Foundation
 
 enum BrushMedium: UInt32, Codable, CaseIterable {
     case dry, oil, watercolor
-    var name: String { switch self { case .dry: "普通"; case .oil: "油彩"; case .watercolor: "水彩" } }
+    var name: String { switch self { case .dry: L10n.text("普通"); case .oil: L10n.text("油彩"); case .watercolor: L10n.text("水彩") } }
 }
 struct BrushWetSettings: Codable, Equatable {
     var medium: BrushMedium = .dry

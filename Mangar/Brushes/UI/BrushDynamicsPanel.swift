@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct BrushDynamicsPanel: View {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     @Binding var brush: BrushConfiguration
     let brushName: String
     let parameter: BrushParameter
@@ -12,12 +13,13 @@ struct BrushDynamicsPanel: View {
                 set: { brush.resolvedDynamics[parameter][input] = $0 })
     }
     var body: some View {
+        let _ = interfaceLanguage
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 3) {
-                Text("\(brushName) · \(parameter.name)动态").font(.system(size: 11, weight: .semibold))
+                Text(L10n.format("%@ · %@动态", "\(brushName)", "\(parameter.name)")).font(.system(size: 11, weight: .semibold))
                 Spacer(minLength: 2)
                 Button(action: close) { Image(systemName: "xmark").font(.system(size: 10)).frame(width: 18, height: 18) }
-                    .accessibilityLabel("关闭动态曲线面板")
+                    .accessibilityLabel(L10n.text("关闭动态曲线面板"))
             }
             HStack(spacing: 2) {
                 ForEach(BrushDynamicInput.allCases) { source in
@@ -34,12 +36,12 @@ struct BrushDynamicsPanel: View {
             }
             HStack {
                 Button { curve.wrappedValue.enabled.toggle() } label: {
-                    Label("启用\(input.name)曲线", systemImage: curve.wrappedValue.enabled ? "checkmark.square.fill" : "square")
+                    Label(L10n.format("启用%@曲线", "\(input.name)"), systemImage: curve.wrappedValue.enabled ? "checkmark.square.fill" : "square")
                         .font(.system(size: 10))
                         .foregroundStyle(curve.wrappedValue.enabled ? Color.accentColor : .white.opacity(0.75))
                 }
                 Spacer()
-                Text("输出倍数").font(.system(size: 9)).foregroundStyle(.secondary)
+                Text(L10n.text("输出倍数")).font(.system(size: 9)).foregroundStyle(.secondary)
             }.frame(height: 18)
             HStack(alignment: .top, spacing: 4) {
                 VStack {
@@ -50,23 +52,23 @@ struct BrushDynamicsPanel: View {
                     .frame(height: 132).padding(4)
             }.frame(height: 140)
             HStack {
-                Text(input == .pressure ? "轻" : input == .speed ? "慢" : "直立")
+                Text(input == .pressure ? L10n.text("轻") : input == .speed ? L10n.text("慢") : L10n.text("直立"))
                 Spacer(); Text(input.name); Spacer()
-                Text(input == .pressure ? "重" : input == .speed ? "快" : "放平")
+                Text(input == .pressure ? L10n.text("重") : input == .speed ? L10n.text("快") : L10n.text("放平"))
             }.font(.system(size: 9)).foregroundStyle(.secondary)
             HStack(spacing: 2) {
-                preset("线性", outputs: [0, 0.25, 0.5, 0.75, 1])
-                preset("反向", outputs: [1, 0.75, 0.5, 0.25, 0])
-                preset("恒定", outputs: [1, 1, 1, 1, 1])
+                preset(L10n.text("线性"), outputs: [0, 0.25, 0.5, 0.75, 1])
+                preset(L10n.text("反向"), outputs: [1, 0.75, 0.5, 0.25, 0])
+                preset(L10n.text("恒定"), outputs: [1, 1, 1, 1, 1])
                 Button {
                     curve.wrappedValue = MangaBrushes.dynamics(brush.preset)[parameter][input]
-                } label: { Text("预设").font(.system(size: 10)).frame(maxWidth: .infinity).frame(height: 18) }
+                } label: { Text(L10n.text("预设")).font(.system(size: 10)).frame(maxWidth: .infinity).frame(height: 18) }
                     .background(Color.white.opacity(0.08))
             }
-            Text("基础值 × 已开启曲线的乘积")
+            Text(L10n.text("基础值 × 已开启曲线的乘积"))
                 .font(.system(size: 9)).foregroundStyle(.secondary)
-            Text(input == .speed ? "笔尖直径/秒；40 对应横轴中点。" :
-                input == .tilt ? "直立为 0，放平为 1。" : "输入经过应用的全局压感曲线。")
+            Text(input == .speed ? L10n.text("笔尖直径/秒；40 对应横轴中点。") :
+                input == .tilt ? L10n.text("直立为 0，放平为 1。") : L10n.text("输入经过应用的全局压感曲线。"))
                 .font(.system(size: 9)).foregroundStyle(.secondary).frame(height: 12).lineLimit(1)
         }
         .buttonStyle(ImmediateButtonStyle()).padding(6).frame(width: 264)
@@ -83,12 +85,14 @@ struct BrushDynamicsPanel: View {
 }
 
 struct BrushResponseCurveGraph: View {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     @Binding var curve: BrushResponseCurve
     let limit: Double
     var begin: () -> Void = {}
     var end: () -> Void = {}
     @State private var draggingPoint: Int?
     var body: some View {
+        let _ = interfaceLanguage
         GeometryReader { geometry in
             ZStack {
                 Canvas { context, size in draw(context, size: size) }
@@ -98,7 +102,7 @@ struct BrushResponseCurveGraph: View {
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { value in updateDrag(value, size: geometry.size) }
                 .onEnded { _ in draggingPoint = nil; end() })
-            .accessibilityLabel("动态曲线，拖动控制点调整倍数")
+            .accessibilityLabel(L10n.text("动态曲线，拖动控制点调整倍数"))
         }
     }
 

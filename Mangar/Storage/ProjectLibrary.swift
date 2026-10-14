@@ -18,7 +18,7 @@ struct ProjectSummary: Identifiable {
 struct ProjectLibrary {
     enum LibraryError: LocalizedError {
         case invalidProject
-        var errorDescription: String? { "所选文件夹不是 Mangar 工程。" }
+        var errorDescription: String? { L10n.text("所选文件夹不是 Mangar 工程。") }
     }
 
     private let manager = FileManager.default
@@ -73,7 +73,7 @@ struct ProjectLibrary {
                            allTileKeys: [], thumbnail: thumbnail)
             if pageCount > 1 {
                 for number in 2...pageCount {
-                    let page = PageRecord.blank(name: "第 \(number) 页", width: width,
+                    let page = PageRecord.blank(name: L10n.format("第 %@ 页", "\(number)"), width: width,
                                                 height: height, comicLayout: layout)
                     manifest.pageIDs.append(page.id)
                     try store.save(manifest: manifest, page: page,

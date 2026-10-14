@@ -2,7 +2,7 @@ import Foundation
 
 enum PageStartSide: String, Codable, CaseIterable {
     case right, left
-    var title: String { self == .right ? "右页起始" : "左页起始" }
+    var title: String { self == .right ? L10n.text("右页起始") : L10n.text("左页起始") }
 }
 
 enum PageContainerSlot: Equatable {

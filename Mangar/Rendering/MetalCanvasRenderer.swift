@@ -113,6 +113,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     var pan: CGPoint = .zero
     private var didFit = false
     private var viewportVisible = true
+    var isViewportVisible: Bool { viewportVisible }
 
     init(page: PageRecord) throws {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -244,8 +245,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
 
         var errorDescription: String? {
             switch self {
-            case .unavailable: "Metal 不可用或 shader 文件缺失。"
-            case .exportFailed: "无法生成 PNG 图像。"
+            case .unavailable: L10n.text("Metal 不可用或 shader 文件缺失。")
+            case .exportFailed: L10n.text("无法生成 PNG 图像。")
             }
         }
     }

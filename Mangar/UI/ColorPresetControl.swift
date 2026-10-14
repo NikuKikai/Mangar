@@ -3,6 +3,7 @@ import UIKit
 
 /// Tap edits/selects the foreground; drag right opens a release-to-select palette.
 struct ColorPresetControl: UIViewRepresentable {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     let color: AppColor
     let selected: Bool
     let presets: [AppColor]
@@ -12,6 +13,7 @@ struct ColorPresetControl: UIViewRepresentable {
 
     func makeUIView(context: Context) -> ColorPresetView { ColorPresetView() }
     func updateUIView(_ view: ColorPresetView, context: Context) {
+        let _ = interfaceLanguage
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
@@ -45,9 +47,9 @@ final class ColorPresetView: UIControl, UIGestureRecognizerDelegate {
         selectionOutline.layer.borderColor = UIColor.systemBlue.cgColor
         addSubview(selectionOutline)
         isAccessibilityElement = true
-        accessibilityLabel = "当前颜色"
-        accessibilityHint = "点按打开颜色面板；向右滑动选择预设颜色"
-        accessibilityCustomActions = [UIAccessibilityCustomAction(name: "打开预设颜色", target: self, selector: #selector(accessibilityOpen))]
+        accessibilityLabel = L10n.text("当前颜色")
+        accessibilityHint = L10n.text("点按打开颜色面板；向右滑动选择预设颜色")
+        accessibilityCustomActions = [UIAccessibilityCustomAction(name: L10n.text("打开预设颜色"), target: self, selector: #selector(accessibilityOpen))]
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layoutSubviews() {
@@ -68,6 +70,9 @@ final class ColorPresetView: UIControl, UIGestureRecognizerDelegate {
         swatch.layer.borderWidth = 1
         selectionOutline.isHidden = !selected
         accessibilityTraits = selected ? [.button, .selected] : [.button]
+        accessibilityLabel = L10n.text("当前颜色")
+        accessibilityHint = L10n.text("点按打开颜色面板；向右滑动选择预设颜色")
+        accessibilityCustomActions = [UIAccessibilityCustomAction(name: L10n.text("打开预设颜色"), target: self, selector: #selector(accessibilityOpen))]
         self.presets = presets
         tapAction = tap; chooseAction = choose; storeAction = store
         refreshCells()
@@ -113,7 +118,7 @@ final class ColorPresetView: UIControl, UIGestureRecognizerDelegate {
         save.setImage(UIImage(systemName: "square.and.arrow.down", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13)), for: .normal)
         save.tintColor = .white
         save.frame = CGRect(x: 4, y: 2, width: 28, height: 26)
-        save.accessibilityLabel = "存入当前颜色"
+        save.accessibilityLabel = L10n.text("存入当前颜色")
         save.addTarget(self, action: #selector(saveTapped), for: .touchUpInside)
         panel.addSubview(save)
         saveButton = save
@@ -124,7 +129,7 @@ final class ColorPresetView: UIControl, UIGestureRecognizerDelegate {
             let cell = UIButton(type: .custom)
             cell.tag = index
             cell.frame = CGRect(x: 4 + (index % 4) * 32, y: 33 + (index / 4) * 32, width: 28, height: 28)
-            cell.accessibilityLabel = "预设颜色 \(index + 1)"
+            cell.accessibilityLabel = L10n.format("预设颜色 %@", "\(index + 1)")
             cell.addTarget(self, action: #selector(cellTapped(_:)), for: .touchUpInside)
             panel.addSubview(cell)
             return cell
@@ -153,10 +158,10 @@ final class ColorPresetView: UIControl, UIGestureRecognizerDelegate {
             if presets.indices.contains(cell.tag) { cell.backgroundColor = presets[cell.tag].uiColor }
             cell.layer.borderWidth = hovered == cell.tag ? 2 : 1
             cell.layer.borderColor = (hovered == cell.tag ? UIColor.systemBlue : UIColor.white.withAlphaComponent(0.35)).cgColor
-            cell.accessibilityHint = storing ? "点击将当前颜色存入此格" : "点击使用此颜色"
+            cell.accessibilityHint = storing ? L10n.text("点击将当前颜色存入此格") : L10n.text("点击使用此颜色")
         }
         saveButton?.backgroundColor = storing || hovered == -1 ? UIColor.systemBlue.withAlphaComponent(0.35) : .clear
-        saveButton?.accessibilityValue = storing ? "选择色格存入" : "未启用"
+        saveButton?.accessibilityValue = storing ? L10n.text("选择色格存入") : L10n.text("未启用")
     }
     private func activate(_ index: Int) {
         if index == -1 {

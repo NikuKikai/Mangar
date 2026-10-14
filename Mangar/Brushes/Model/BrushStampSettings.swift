@@ -2,11 +2,11 @@ import Foundation
 
 enum BrushTipRotation: UInt32, Codable, CaseIterable {
     case fixed, direction, stylus
-    var name: String { switch self { case .fixed: "固定"; case .direction: "运笔"; case .stylus: "笔倾" } }
+    var name: String { switch self { case .fixed: L10n.text("固定"); case .direction: L10n.text("运笔"); case .stylus: L10n.text("笔倾") } }
 }
 enum BrushTipSequence: UInt32, Codable, CaseIterable {
     case ordered, random
-    var name: String { self == .ordered ? "顺序" : "随机" }
+    var name: String { self == .ordered ? L10n.text("顺序") : L10n.text("随机") }
 }
 struct BrushStampSettings: Codable, Equatable {
     var assetIDs: [String] = []

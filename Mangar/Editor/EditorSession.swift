@@ -137,7 +137,7 @@ final class EditorSession: ObservableObject {
     func copyBrushResource() {
         endStroke(); flushBrushResource()
         do {
-            let resource = try BrushResourceStore.shared.create(name: brushName + " 副本", configuration: brush)
+            let resource = try BrushResourceStore.shared.create(name: brushName + L10n.text(" 副本"), configuration: brush)
             brushResources = try BrushResourceStore.shared.resources()
             brush = try BrushResourceStore.shared.configuration(resource, color: brush)
             selectedTool = .brush
@@ -165,7 +165,7 @@ final class EditorSession: ObservableObject {
     func importBrushTips(_ urls: [URL], channel: BrushTipChannel) {
         endStroke()
         guard urls.count + brush.stampSettings.assetIDs.count <= 16 else {
-            message = "每支笔刷最多使用 16 张笔尖素材。"; return
+            message = L10n.text("每支笔刷最多使用 16 张笔尖素材。"); return
         }
         do {
             var assets: [BrushTipAsset] = []
@@ -590,7 +590,7 @@ final class EditorSession: ObservableObject {
     private func insertLayer(kind: LayerRecord.Kind) {
         cancelStroke()
         let count = page.layers.filter { $0.kind == kind }.count + 1
-        var layer = LayerRecord(name: kind == .folder ? "文件夹 \(count)" : "图层 \(count)", kind: kind)
+        var layer = LayerRecord(name: kind == .folder ? L10n.format("文件夹 %@", "\(count)") : L10n.format("图层 %@", "\(count)"), kind: kind)
         var updated = page.layers
         if let selectedLayerID,
            let selected = page.layers.first(where: { $0.id == selectedLayerID }) {
@@ -728,10 +728,10 @@ final class EditorSession: ObservableObject {
             let width = layout?.canvasWidthPixels ?? (singleWidth * (isSpread ? 2 : 1))
             let height = layout?.canvasHeightPixels ?? page.height
             guard width <= 16384, height <= 16384 else {
-                message = "对开画布尺寸超出当前支持的 16384 px 上限，请使用较小的单页尺寸或分辨率。"
+                message = L10n.text("对开画布尺寸超出当前支持的 16384 px 上限，请使用较小的单页尺寸或分辨率。")
                 return
             }
-            let newPage = PageRecord.blank(name: "新页面", width: width, height: height,
+            let newPage = PageRecord.blank(name: L10n.text("新页面"), width: width, height: height,
                                             comicLayout: layout, isSpread: isSpread)
             let scale = min(320.0 / Double(width), 320.0 / Double(height), 1)
             let size = CGSize(width: max(1, Int((Double(width) * scale).rounded())),
@@ -745,7 +745,7 @@ final class EditorSession: ObservableObject {
             manifest = updated
             pageThumbnails[newPage.id] = UIImage(data: thumbnail)
         } catch {
-            message = "无法新增页面：\(error.localizedDescription)"
+            message = L10n.format("无法新增页面：%@", "\(error.localizedDescription)")
         }
     }
 
@@ -781,7 +781,7 @@ final class EditorSession: ObservableObject {
             let output = try PageConversion.merge(right: ConvertedPage(page: r.0, tiles: r.1),
                                                   left: ConvertedPage(page: l.0, tiles: l.1))
             try replacePages(ids, outputs: [output])
-        } catch { message = "合并失败：\(error.localizedDescription)" }
+        } catch { message = L10n.format("合并失败：%@", "\(error.localizedDescription)") }
     }
 
     func splitPage(_ id: UUID) {
@@ -789,7 +789,7 @@ final class EditorSession: ObservableObject {
         do {
             let source = try store.loadPage(id)
             try replacePages([id], outputs: PageConversion.split(ConvertedPage(page: source.0, tiles: source.1)))
-        } catch { message = "拆分失败：\(error.localizedDescription)" }
+        } catch { message = L10n.format("拆分失败：%@", "\(error.localizedDescription)") }
     }
 
     func deletePage(_ id: UUID) {
@@ -800,7 +800,7 @@ final class EditorSession: ObservableObject {
                 [ConvertedPage(page: .blank(width: page.width, height: page.height,
                     comicLayout: page.comicLayout, isSpread: page.isDoublePage), tiles: [:])] : []
             try replacePages([id], outputs: outputs)
-        } catch { message = "删除失败：\(error.localizedDescription)" }
+        } catch { message = L10n.format("删除失败：%@", "\(error.localizedDescription)") }
     }
 
     private func replacePages(_ ids: [UUID], outputs: [ConvertedPage]) throws {
@@ -854,7 +854,7 @@ final class EditorSession: ObservableObject {
             needsSave = true
             return persist()
         } catch {
-            message = "无法打开页面：\(error.localizedDescription)"
+            message = L10n.format("无法打开页面：%@", "\(error.localizedDescription)")
             return false
         }
     }
@@ -863,7 +863,7 @@ final class EditorSession: ObservableObject {
         do {
             pageThumbnails[page.id] = UIImage(data: try renderer.projectThumbnailPNG())
         } catch {
-            message = "无法生成页面缩略图：\(error.localizedDescription)"
+            message = L10n.format("无法生成页面缩略图：%@", "\(error.localizedDescription)")
         }
     }
 
@@ -887,7 +887,7 @@ final class EditorSession: ObservableObject {
             try store.savePageThumbnail(data, pageID: id)
             pageThumbnails[id] = UIImage(data: data)
         } catch {
-            message = "无法读取页面缩略图：\(error.localizedDescription)"
+            message = L10n.format("无法读取页面缩略图：%@", "\(error.localizedDescription)")
         }
     }
 
@@ -895,11 +895,11 @@ final class EditorSession: ObservableObject {
         do {
             let data = try renderer.exportPNG(cropToContent: cropToContent)
             let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("Mangar-第\(pageNumber)页-\(UUID().uuidString).png")
+                .appendingPathComponent(L10n.format("Mangar-第%@页-%@.png", "\(pageNumber)", "\(UUID().uuidString)"))
             try data.write(to: url, options: .atomic)
             exportURL = url
         } catch {
-            message = "PNG 导出失败：\(error.localizedDescription)"
+            message = L10n.format("PNG 导出失败：%@", "\(error.localizedDescription)")
         }
     }
 
@@ -1016,7 +1016,7 @@ final class EditorSession: ObservableObject {
             needsSave = false
             return true
         } catch {
-            message = "保存失败：\(error.localizedDescription)"
+            message = L10n.format("保存失败：%@", "\(error.localizedDescription)")
             return false
         }
     }

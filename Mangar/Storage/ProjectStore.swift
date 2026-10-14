@@ -19,10 +19,10 @@ struct ProjectStore {
 
         var errorDescription: String? {
             switch self {
-            case .unsupportedVersion: "工程文件版本比当前 App 新，无法安全打开。"
-            case .missingPage: "找不到工程中的页面文件。"
-            case .missingTile: "工程中的绘画图块丢失或损坏。"
-            case .incompleteMigration: "旧工程迁移缺少图块数据。"
+            case .unsupportedVersion: L10n.text("工程文件版本比当前 App 新，无法安全打开。")
+            case .missingPage: L10n.text("找不到工程中的页面文件。")
+            case .missingTile: L10n.text("工程中的绘画图块丢失或损坏。")
+            case .incompleteMigration: L10n.text("旧工程迁移缺少图块数据。")
             }
         }
     }
@@ -78,7 +78,7 @@ struct ProjectStore {
         }
         if page.backgroundSchemaVersion != 3 {
             if !page.layers.contains(where: { $0.kind == .shape }) {
-                page.layers.insert(LayerRecord(name: "背景", kind: .shape, isLocked: true,
+                page.layers.insert(LayerRecord(name: L10n.text("背景"), kind: .shape, isLocked: true,
                     shape: .rect(bounds: CGRect(x: 0, y: 0, width: page.width, height: page.height), fill: .white)), at: 0)
             }
             page.backgroundSchemaVersion = 3

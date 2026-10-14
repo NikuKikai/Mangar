@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 import UIKit
 
 struct ProjectManagerView: View {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     let projects: [ProjectSummary]
     let currentProject: ProjectSummary?
     let close: (() -> Void)?
@@ -10,9 +11,11 @@ struct ProjectManagerView: View {
     let create: (String, ComicPageLayout, Int, PageStartSide) -> Void
     let importProject: (URL) -> Void
     let delete: (URL) -> Void
+    let applicationSettings: () -> Void
 
+    @State private var showingAppMenu = false
     @State private var creating = false
-    @State private var name = "未命名项目"
+    @State private var name = L10n.text("未命名项目")
     @State private var width = "182"
     @State private var height = "257"
     @State private var dpi = "350"
@@ -52,6 +55,7 @@ struct ProjectManagerView: View {
                                     alignment: .top)]
 
     var body: some View {
+        let _ = interfaceLanguage
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4) {
                 Button { close?() } label: {
@@ -60,23 +64,29 @@ struct ProjectManagerView: View {
                         .frame(width: 25, height: 24)
                 }
                 .disabled(close == nil)
-                .help(close == nil ? "Mangar" : "返回编辑界面")
-                .accessibilityLabel(close == nil ? "Mangar，尚未打开项目" : "返回编辑界面")
+                .help(close == nil ? "Mangar" : L10n.text("返回编辑界面"))
+                .accessibilityLabel(close == nil ? L10n.text("Mangar，尚未打开项目") : L10n.text("返回编辑界面"))
                 Rectangle().fill(.white.opacity(0.18))
                     .frame(width: 1, height: 18).padding(.horizontal, 3)
-                Text(creating ? "新建项目" : "项目管理")
+                Text(creating ? L10n.text("新建项目") : L10n.text("项目管理"))
                 Spacer(minLength: 8)
                 if creating {
                     Button { creating = false } label: {
-                        Label("返回项目", systemImage: "arrow.left")
+                        Label(L10n.text("返回项目"), systemImage: "arrow.left")
                             .padding(.horizontal, 4).frame(height: 24)
                     }
                 } else {
                     Button { showingImporter = true } label: {
-                        Label("导入项目…", systemImage: "square.and.arrow.down")
+                        Label(L10n.text("导入项目…"), systemImage: "square.and.arrow.down")
                             .padding(.horizontal, 4).frame(height: 24)
                     }
                 }
+                Button {
+                    menuProjectID = nil
+                    showingPresets = false
+                    showingAppMenu.toggle()
+                } label: { Image(systemName: "line.3.horizontal").frame(width: 22, height: 24) }
+                    .help(L10n.text("应用菜单")).accessibilityLabel(L10n.text("应用菜单"))
             }
             .font(.system(size: 13))
             .buttonStyle(ImmediateButtonStyle())
@@ -94,6 +104,30 @@ struct ProjectManagerView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(red: 0.115, green: 0.12, blue: 0.13))
         .preferredColorScheme(.dark)
+        .overlay(alignment: .topTrailing) {
+            if showingAppMenu {
+                ZStack(alignment: .topTrailing) {
+                    Button { showingAppMenu = false } label: { Color.clear.contentShape(Rectangle()) }
+                        .accessibilityLabel(L10n.text("关闭应用菜单"))
+                    VStack(spacing: 0) {
+                        if let close {
+                            Button { showingAppMenu = false; close() } label: {
+                                Label(L10n.text("返回编辑界面"), systemImage: "arrow.left")
+                                    .frame(maxWidth: .infinity, minHeight: 27, alignment: .leading)
+                            }
+                        }
+                        Button { showingAppMenu = false; applicationSettings() } label: {
+                            Label(L10n.text("settings.title"), systemImage: "gearshape")
+                                .frame(maxWidth: .infinity, minHeight: 27, alignment: .leading)
+                        }
+                    }.font(.system(size: 12)).padding(5).frame(width: 174)
+                        .background(Color(red: 0.16, green: 0.17, blue: 0.18))
+                        .overlay(Rectangle().stroke(.white.opacity(0.25), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.45), radius: 8, y: 4)
+                        .offset(x: -4, y: 35)
+                }.buttonStyle(ImmediateButtonStyle())
+            }
+        }
         .overlayPreferenceValue(ProjectCardBoundsKey.self) { anchors in
             if let id = menuProjectID, let anchor = anchors[id],
                let project = ([currentProject].compactMap { $0 } + projects).first(where: { $0.id == id }) {
@@ -103,7 +137,7 @@ struct ProjectManagerView: View {
                         Color.clear
                             .contentShape(Rectangle())
                             .onTapGesture { menuProjectID = nil }
-                            .accessibilityLabel("关闭项目菜单")
+                            .accessibilityLabel(L10n.text("关闭项目菜单"))
                             .accessibilityAddTraits(.isButton)
                         projectMenu(project)
                             .position(x: max(75, min(geometry.size.width - 75, bounds.maxX - 81)),
@@ -118,15 +152,15 @@ struct ProjectManagerView: View {
                     Color.black.opacity(0.55)
                         .ignoresSafeArea()
                     VStack(alignment: .leading, spacing: 14) {
-                        Text("删除项目？").font(.system(size: 16, weight: .semibold))
-                        Text("“\(project.name)”及其所有页面将被删除，此操作无法撤销。")
+                        Text(L10n.text("删除项目？")).font(.system(size: 16, weight: .semibold))
+                        Text(L10n.format("“%@”及其所有页面将被删除，此操作无法撤销。", "\(project.name)"))
                             .font(.system(size: 13))
                         HStack(spacing: 8) {
                             Spacer()
-                            Button("取消") { pendingDelete = nil }
+                            Button(L10n.text("取消")) { pendingDelete = nil }
                                 .padding(.horizontal, 12).frame(height: 30)
                                 .background(Color.white.opacity(0.08))
-                            Button("删除") {
+                            Button(L10n.text("删除")) {
                                 pendingDelete = nil
                                 delete(project.url)
                             }
@@ -156,7 +190,7 @@ struct ProjectManagerView: View {
                     VStack(spacing: 12) {
                         Image(systemName: "plus")
                             .font(.system(size: 38, weight: .ultraLight))
-                        Text("新建项目")
+                        Text(L10n.text("新建项目"))
                             .font(.system(size: 15, weight: .medium))
                     }
                     .foregroundStyle(.primary)
@@ -202,12 +236,12 @@ struct ProjectManagerView: View {
                             .lineLimit(1)
                         Spacer(minLength: 0)
                         if current {
-                            Text("当前")
+                            Text(L10n.text("当前"))
                                 .font(.system(size: 10, weight: .medium))
                                 .foregroundStyle(Color.accentColor)
                         }
                     }
-                    Text("\(project.pageCount) 页  ·  \(project.modifiedAt.formatted(date: .abbreviated, time: .shortened))")
+                    Text(L10n.format("%@ 页  ·  %@", "\(project.pageCount)", "\(L10n.date(project.modifiedAt))"))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -231,7 +265,7 @@ struct ProjectManagerView: View {
                     menuProjectID = nil
                     pendingDelete = project
                 } label: {
-                    Label("删除项目…", systemImage: "trash")
+                    Label(L10n.text("删除项目…"), systemImage: "trash")
                         .font(.system(size: 12))
                         .foregroundStyle(Color(red: 1, green: 0.48, blue: 0.48))
                         .frame(width: 134, height: 32, alignment: .leading)
@@ -247,16 +281,16 @@ struct ProjectManagerView: View {
     private var creationForm: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("新建项目")
+                Text(L10n.text("新建项目"))
                     .font(.system(size: 21, weight: .semibold))
                 VStack(alignment: .leading, spacing: 0) {
                     Button {
                         showingPresets.toggle()
                     } label: {
                         HStack {
-                            Text("预设尺寸")
+                            Text(L10n.text("预设尺寸"))
                             Spacer()
-                            Text(selectedPreset ?? "自定义")
+                            Text(selectedPreset ?? L10n.text("自定义"))
                                 .foregroundStyle(.secondary)
                             Image(systemName: showingPresets ? "chevron.up" : "chevron.down")
                                 .font(.system(size: 10))
@@ -294,17 +328,17 @@ struct ProjectManagerView: View {
                     }
                 }
                 .zIndex(1)
-                field("项目名称", value: $name)
+                field(L10n.text("项目名称"), value: $name)
                 HStack(spacing: 14) {
-                    field("内容宽度 / mm", value: $width, numeric: true, decimal: true)
-                    field("内容高度 / mm", value: $height, numeric: true, decimal: true)
+                    field(L10n.text("内容宽度 / mm"), value: $width, numeric: true, decimal: true)
+                    field(L10n.text("内容高度 / mm"), value: $height, numeric: true, decimal: true)
                 }
                 HStack(spacing: 14) {
-                    field("分辨率 / dpi", value: $dpi, numeric: true)
-                    field("初始页数", value: $pageCount, numeric: true)
+                    field(L10n.text("分辨率 / dpi"), value: $dpi, numeric: true)
+                    field(L10n.text("初始页数"), value: $pageCount, numeric: true)
                 }
                 HStack(spacing: 8) {
-                    Text("起始页").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(L10n.text("起始页")).font(.system(size: 12)).foregroundStyle(.secondary)
                     ForEach(PageStartSide.allCases, id: \.self) { side in
                         Button { startingSide = side } label: {
                             Text(side.title)
@@ -317,20 +351,20 @@ struct ProjectManagerView: View {
                     }
                 }
                 HStack(spacing: 14) {
-                    field("左、右各留 / mm", value: $horizontalMargin, numeric: true, decimal: true)
-                    field("上、下各留 / mm", value: $verticalMargin, numeric: true, decimal: true)
+                    field(L10n.text("左、右各留 / mm"), value: $horizontalMargin, numeric: true, decimal: true)
+                    field(L10n.text("上、下各留 / mm"), value: $verticalMargin, numeric: true, decimal: true)
                 }
-                Text("默认 B5 内容置于 A4 稿纸：左右各 14 mm，上下各 20 mm。出血参考框距内容框 3 mm。")
+                Text(L10n.text("默认 B5 内容置于 A4 稿纸：左右各 14 mm，上下各 20 mm。出血参考框距内容框 3 mm。"))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                Text(draftLayout.map { "画布预览：\($0.canvasWidthPixels) × \($0.canvasHeightPixels) px  ·  内容：\($0.contentWidthPixels) × \($0.contentHeightPixels) px" }
-                     ?? "请输入有效尺寸；画布最长边不超过 16384 px")
+                Text(draftLayout.map { L10n.format("画布预览：%@ × %@ px  ·  内容：%@ × %@ px", "\($0.canvasWidthPixels)", "\($0.canvasHeightPixels)", "\($0.contentWidthPixels)", "\($0.contentHeightPixels)") }
+                     ?? L10n.text("请输入有效尺寸；画布最长边不超过 16384 px"))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                 HStack {
-                    Button("取消") { creating = false }
+                    Button(L10n.text("取消")) { creating = false }
                     Spacer()
-                    Button("创建并打开") {
+                    Button(L10n.text("创建并打开")) {
                         guard let layout = draftLayout, let count = Int(pageCount) else { return }
                         create(name.trimmingCharacters(in: .whitespacesAndNewlines), layout, count, startingSide)
                     }
@@ -374,6 +408,7 @@ private struct ProjectCardBoundsKey: PreferenceKey {
 }
 
 struct ProjectCardInteraction: UIViewRepresentable {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     let name: String
     let open: () -> Void
     let menu: () -> Void
@@ -400,13 +435,14 @@ struct ProjectCardInteraction: UIViewRepresentable {
         view.addGestureRecognizer(longPress)
         view.addGestureRecognizer(secondaryClick)
         view.accessibilityCustomActions = [
-            UIAccessibilityCustomAction(name: "项目菜单", target: context.coordinator,
+            UIAccessibilityCustomAction(name: L10n.text("项目菜单"), target: context.coordinator,
                                         selector: #selector(Coordinator.accessibilityMenu))
         ]
         return view
     }
 
     func updateUIView(_ view: ProjectCardHitView, context: Context) {
+        let _ = interfaceLanguage
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }

@@ -9,6 +9,7 @@ struct SlideSelectToolItem: Identifiable, Equatable {
 
 /// Tap activates the remembered tool; drag right to reveal tools and release to choose.
 struct SlideSelectToolControl: UIViewRepresentable {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     let items: [SlideSelectToolItem]
     let currentID: String
     let selected: Bool
@@ -17,6 +18,7 @@ struct SlideSelectToolControl: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SlideSelectToolView { SlideSelectToolView() }
     func updateUIView(_ view: SlideSelectToolView, context: Context) {
+        let _ = interfaceLanguage
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
@@ -48,8 +50,8 @@ final class SlideSelectToolView: UIControl, UIGestureRecognizerDelegate {
         indicator.isUserInteractionEnabled = false
         addSubview(icon); addSubview(indicator)
         isAccessibilityElement = true
-        accessibilityHint = "点按使用当前工具；向右滑动展开，移动到工具上松开选择"
-        accessibilityCustomActions = [UIAccessibilityCustomAction(name: "展开工具", target: self,
+        accessibilityHint = L10n.text("点按使用当前工具；向右滑动展开，移动到工具上松开选择")
+        accessibilityCustomActions = [UIAccessibilityCustomAction(name: L10n.text("展开工具"), target: self,
             selector: #selector(accessibilityOpen))]
         NotificationCenter.default.addObserver(self, selector: #selector(close),
             name: UIApplication.willResignActiveNotification, object: nil)
@@ -59,13 +61,15 @@ final class SlideSelectToolView: UIControl, UIGestureRecognizerDelegate {
     func configure(items: [SlideSelectToolItem], currentID: String, selected: Bool, enabled: Bool,
                    activate: @escaping () -> Void, choose: @escaping (String) -> Void) {
         if !enabled || (panel != nil && self.items != items) { close() }
+        accessibilityHint = L10n.text("点按使用当前工具；向右滑动展开，移动到工具上松开选择")
+        accessibilityCustomActions = [UIAccessibilityCustomAction(name: L10n.text("展开工具"), target: self, selector: #selector(accessibilityOpen))]
         self.items = items; self.currentID = currentID
         self.activate = activate; self.choose = choose
         isSelected = selected; isEnabled = enabled
         let current = items.first { $0.id == currentID }
         icon.image = UIImage(systemName: current?.icon ?? "pencil.tip",
             withConfiguration: UIImage.SymbolConfiguration(pointSize: 17)) ?? UIImage(systemName: "pencil.tip")
-        accessibilityLabel = current?.name ?? "画笔"
+        accessibilityLabel = current?.name ?? L10n.text("画笔")
         accessibilityTraits = selected ? [.button, .selected] : [.button]
         refreshAppearance()
     }

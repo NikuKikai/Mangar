@@ -4,7 +4,7 @@ import ImageIO
 
 enum BrushTipChannel: String, CaseIterable {
     case alpha, darkness
-    var name: String { self == .alpha ? "透明度" : "灰度（黑）" }
+    var name: String { self == .alpha ? L10n.text("透明度") : L10n.text("灰度（黑）") }
 }
 enum BrushTipImporter {
     static func load(_ url: URL, channel: BrushTipChannel) throws -> BrushTipAsset {

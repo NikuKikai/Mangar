@@ -3,12 +3,14 @@ import UIKit
 
 /// Inline naming and a window-level menu, so rows near the list edge are not clipped.
 struct LayerNameControl: UIViewRepresentable {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     let name: String
     let primary: Bool
     let rename: (String) -> Void
 
     func makeUIView(context: Context) -> LayerNameView { LayerNameView() }
     func updateUIView(_ view: LayerNameView, context: Context) {
+        let _ = interfaceLanguage
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
@@ -20,7 +22,7 @@ struct LayerNameControl: UIViewRepresentable {
 final class LayerNameView: UIView, UITextFieldDelegate, UIGestureRecognizerDelegate {
     private let title = UILabel()
     private let field = UITextField()
-    private let presets = ["草稿", "线稿", "底色", "阴影", "高光", "网点", "背景", "文件夹"]
+    private var presets: [String] { [L10n.text("草稿"), L10n.text("线稿"), L10n.text("底色"), L10n.text("阴影"), L10n.text("高光"), L10n.text("网点"), L10n.text("背景"), L10n.text("文件夹")] }
     private let rowHeight: CGFloat = 24
     private var name = ""
     private var onRename: ((String) -> Void)?
@@ -61,7 +63,7 @@ final class LayerNameView: UIView, UITextFieldDelegate, UIGestureRecognizerDeleg
         NotificationCenter.default.addObserver(self, selector: #selector(deactivated),
             name: UIApplication.willResignActiveNotification, object: nil)
         isAccessibilityElement = true
-        accessibilityHint = "双击编辑名称，或上下拖动选择预设名称"
+        accessibilityHint = L10n.text("双击编辑名称，或上下拖动选择预设名称")
         accessibilityTraits = .button
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -73,6 +75,7 @@ final class LayerNameView: UIView, UITextFieldDelegate, UIGestureRecognizerDeleg
         positionMenu()
     }
     func configure(name: String, primary: Bool, rename: @escaping (String) -> Void) {
+        accessibilityHint = L10n.text("双击编辑名称，或上下拖动选择预设名称")
         self.name = name
         title.text = name
         let font = UIFont.systemFont(ofSize: 11, weight: primary ? .semibold : .regular)
@@ -193,7 +196,7 @@ final class LayerNameView: UIView, UITextFieldDelegate, UIGestureRecognizerDeleg
     func textFieldShouldReturn(_ textField: UITextField) -> Bool { finish(commit: true); return true }
     func textFieldDidEndEditing(_ textField: UITextField) { if editing { finish(commit: true) } }
     override var keyCommands: [UIKeyCommand]? {
-        [UIKeyCommand(title: "取消重命名", action: #selector(cancelEditing), input: UIKeyCommand.inputEscape)]
+        [UIKeyCommand(title: L10n.text("取消重命名"), action: #selector(cancelEditing), input: UIKeyCommand.inputEscape)]
     }
     @objc private func cancelEditing() { finish(commit: false) }
     override func accessibilityActivate() -> Bool { startEditing(); return true }

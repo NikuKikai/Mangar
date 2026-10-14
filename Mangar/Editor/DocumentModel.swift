@@ -44,18 +44,21 @@ enum LayerBlendMode: String, Codable, CaseIterable {
 
     var title: String {
         switch self {
-        case .normal: "正常"
-        case .multiply: "乘算"
-        case .screen: "滤色"
-        case .overlay: "叠加"
-        case .darken: "变暗"
-        case .lighten: "变亮"
-        case .softLight: "柔光"
-        case .hardLight: "强光"
-        case .difference: "差值"
-        case .add: "添加（发光）"
+        case .normal: L10n.text("正常")
+        case .multiply: L10n.text("乘算")
+        case .screen: L10n.text("滤色")
+        case .overlay: L10n.text("blend.overlay")
+        case .darken: L10n.text("变暗")
+        case .lighten: L10n.text("变亮")
+        case .softLight: L10n.text("柔光")
+        case .hardLight: L10n.text("强光")
+        case .difference: L10n.text("差值")
+        case .add: L10n.text("添加（发光）")
         }
     }
+    /// Short UI badge names are explicit; truncation can make modes indistinguishable.
+    var shortTitle: String { L10n.text("blend.\(rawValue).short") }
+
     var shaderIndex: UInt32 { UInt32(Self.allCases.firstIndex(of: self)!) }
 }
 
@@ -221,16 +224,16 @@ struct PageRecord: Codable, Identifiable, Equatable {
         return updated == layers ? nil : updated
     }
 
-    static func blank(name: String = "第 1 页",
+    static func blank(name: String = L10n.text("第 1 页"),
                       width: Int = CanvasConstants.defaultWidth,
                       height: Int = CanvasConstants.defaultHeight,
                       comicLayout: ComicPageLayout? = nil,
                       isSpread: Bool = false) -> PageRecord {
         PageRecord(name: name, width: width,
                    height: height, comicLayout: comicLayout, isSpread: isSpread,
-                   layers: [LayerRecord(name: "背景", kind: .shape, isLocked: true,
+                   layers: [LayerRecord(name: L10n.text("背景"), kind: .shape, isLocked: true,
                        shape: .rect(bounds: CGRect(x: 0, y: 0, width: width, height: height), fill: .white)),
-                            LayerRecord(name: "图层 1")])
+                            LayerRecord(name: L10n.text("图层 1"))])
     }
 }
 
@@ -257,7 +260,7 @@ extension PageRecord {
 
 struct ProjectManifest: Codable {
     var formatVersion: Int = 1
-    var name: String = "我的漫画"
+    var name: String = L10n.text("我的漫画")
     var pageIDs: [UUID]
     var selectedPageID: UUID
     var startingSide: PageStartSide = .right

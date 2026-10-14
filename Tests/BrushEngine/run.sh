@@ -5,7 +5,7 @@ scratch=$(mktemp -d /tmp/mangar-brush-check.XXXXXX)
 trap 'rm -rf "$scratch"' EXIT
 cd "$root"
 xcrun swiftc -parse-as-library -swift-version 5 \
-  Mangar/Editor/DocumentModel.swift Mangar/Editor/LayerShape.swift Mangar/Editor/LayerCurveEffect.swift Mangar/Editor/BucketFill.swift \
+  Mangar/Localization/AppLanguage.swift Mangar/Localization/L10n.swift Mangar/Editor/DocumentModel.swift Mangar/Editor/LayerShape.swift Mangar/Editor/LayerCurveEffect.swift Mangar/Editor/BucketFill.swift \
   Mangar/Editor/PageArrangement.swift Mangar/Editor/PressureCurve.swift \
   Mangar/Editor/AppToolPreferences.swift Mangar/Rendering/SelectionSnapshot.swift \
   Mangar/Brushes/Model/*.swift Mangar/Brushes/Presets/*.swift \

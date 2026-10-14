@@ -9,7 +9,7 @@ struct LayerCurveEffect: Codable, Equatable {
     var blue: [Double] = [0, 0.25, 0.5, 0.75, 1]
 
     enum Channel: Int, CaseIterable { case master, red, green, blue
-        var name: String { switch self { case .master: "RGB"; case .red: "红"; case .green: "绿"; case .blue: "蓝" } }
+        var name: String { switch self { case .master: "RGB"; case .red: L10n.text("红"); case .green: L10n.text("绿"); case .blue: L10n.text("蓝") } }
     }
     subscript(_ channel: Channel) -> [Double] {
         get { switch channel { case .master: master; case .red: red; case .green: green; case .blue: blue } }

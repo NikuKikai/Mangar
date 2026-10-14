@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct PageOverviewView: View {
+    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
     @ObservedObject var session: EditorSession
     let openPage: (UUID) -> Void
     @State private var dragging: UUID?
@@ -12,6 +13,7 @@ struct PageOverviewView: View {
     private let columns = [GridItem(.adaptive(minimum: 270, maximum: 350), spacing: 24)]
 
     var body: some View {
+        let _ = interfaceLanguage
         ScrollView {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
                 ForEach(PageContainer.arrange(session.manifest)) { container in
@@ -46,22 +48,22 @@ struct PageOverviewView: View {
         .overlay {
             if let id = menuPage { pageMenu(id) }
         }
-        .alert("删除页面？", isPresented: Binding(get: { pendingDelete != nil },
+        .alert(L10n.text("删除页面？"), isPresented: Binding(get: { pendingDelete != nil },
                set: { if !$0 { pendingDelete = nil } })) {
-            Button("取消", role: .cancel) { pendingDelete = nil }
-            Button("删除", role: .destructive) {
+            Button(L10n.text("取消"), role: .cancel) { pendingDelete = nil }
+            Button(L10n.text("删除"), role: .destructive) {
                 if let id = pendingDelete { session.deletePage(id) }
                 pendingDelete = nil
             }
-        } message: { Text("页面及其绘画数据将被删除。删除最后一页时会生成一个空白页。") }
-        .alert("合并为对开页？", isPresented: Binding(get: { pendingMerge != nil },
+        } message: { Text(L10n.text("页面及其绘画数据将被删除。删除最后一页时会生成一个空白页。")) }
+        .alert(L10n.text("合并为对开页？"), isPresented: Binding(get: { pendingMerge != nil },
                set: { if !$0 { pendingMerge = nil } })) {
-            Button("取消", role: .cancel) { pendingMerge = nil }
-            Button("合并") {
+            Button(L10n.text("取消"), role: .cancel) { pendingMerge = nil }
+            Button(L10n.text("合并")) {
                 if let id = pendingMerge { session.mergePages(id) }
                 pendingMerge = nil
             }
-        } message: { Text("保留左右页的图层，去掉中间两侧的画布余量。") }
+        } message: { Text(L10n.text("保留左右页的图层，去掉中间两侧的画布余量。")) }
     }
 
     @ViewBuilder
@@ -112,7 +114,7 @@ struct PageOverviewView: View {
                         .foregroundStyle(.secondary)
                 }
                 .frame(height: 210)
-                Text(spread ? "添加对开页" : "添加单页")
+                Text(spread ? L10n.text("添加对开页") : L10n.text("添加单页"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .frame(height: 26)
@@ -120,7 +122,7 @@ struct PageOverviewView: View {
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
         }
-        .accessibilityLabel(spread ? "添加对开页" : "在此添加单页")
+        .accessibilityLabel(spread ? L10n.text("添加对开页") : L10n.text("在此添加单页"))
     }
 
     private func pageThumbnail(_ id: UUID, number: Int, spread: Bool) -> some View {
@@ -136,7 +138,7 @@ struct PageOverviewView: View {
                             .aspectRatio(contentMode: .fit)
                             .padding(5)
                     } else {
-                        Text("处理中…").font(.system(size: 10)).foregroundStyle(.secondary)
+                        Text(L10n.text("处理中…")).font(.system(size: 10)).foregroundStyle(.secondary)
                     }
                     if spread {
                         Rectangle().fill(Color.gray.opacity(0.45))
@@ -145,7 +147,7 @@ struct PageOverviewView: View {
                 }
                 .frame(height: 210)
                 .overlay {
-                    ProjectCardInteraction(name: "第 \(title) 页", open: { openPage(id) },
+                    ProjectCardInteraction(name: L10n.format("第 %@ 页", "\(title)"), open: { openPage(id) },
                                            menu: { menuPage = id })
                 }
                 ZStack {
@@ -165,9 +167,9 @@ struct PageOverviewView: View {
                                     target = nil
                                     dragging = nil
                                 })
-                            .accessibilityLabel("拖动第 \(title) 页")
+                            .accessibilityLabel(L10n.format("拖动第 %@ 页", "\(title)"))
                         Spacer(minLength: 0)
-                        if current { Text("当前").font(.system(size: 10)).foregroundStyle(Color.accentColor) }
+                        if current { Text(L10n.text("当前")).font(.system(size: 10)).foregroundStyle(Color.accentColor) }
                     }
                 }
                 .font(.system(size: 12))
@@ -191,12 +193,12 @@ struct PageOverviewView: View {
             Color.black.opacity(0.12).contentShape(Rectangle()).onTapGesture { menuPage = nil }
             VStack(spacing: 0) {
                 if session.manifest.spreadPageIDs.contains(id) {
-                    menuButton("拆分为两个单页", icon: "rectangle.split.2x1") {
+                    menuButton(L10n.text("拆分为两个单页"), icon: "rectangle.split.2x1") {
                         menuPage = nil
                         session.splitPage(id)
                     }
                 } else {
-                    menuButton("合并为对开页", icon: "rectangle") {
+                    menuButton(L10n.text("合并为对开页"), icon: "rectangle") {
                         menuPage = nil
                         pendingMerge = id
                     }
@@ -204,7 +206,7 @@ struct PageOverviewView: View {
                     .opacity(session.mergePartner(for: id) == nil ? 0.4 : 1)
                 }
                 Divider()
-                menuButton("删除", icon: "trash", destructive: true) {
+                menuButton(L10n.text("删除"), icon: "trash", destructive: true) {
                     menuPage = nil
                     pendingDelete = id
                 }

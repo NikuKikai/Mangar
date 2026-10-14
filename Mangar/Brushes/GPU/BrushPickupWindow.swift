@@ -18,7 +18,7 @@ final class BrushPickupWindow {
     }
     func encode(command: MTLCommandBuffer, points: [StrokeSample], base: [TileKey: MTLTexture],
                 layer: UUID, selection snapshot: SelectionSnapshot?, empty: MTLTexture,
-                fullSelection: MTLTexture, emptySelection: MTLTexture) -> SIMD4<Int32> {
+                fullSelection: MTLTexture, emptySelection: MTLTexture, origin: SIMD2<Double> = .zero) -> SIMD4<Int32> {
         let minX = Int(floor((points.map(\.x).min()! - 129) / 256))
         let minY = Int(floor((points.map(\.y).min()! - 129) / 256))
         let maxX = Int(floor((points.map(\.x).max()! + 129) / 256))
@@ -41,6 +41,6 @@ final class BrushPickupWindow {
             }
         }
         encoder.endEncoding()
-        return SIMD4(Int32(minX), Int32(minY), Int32(columns), Int32(rows))
+        return SIMD4(Int32(minX - Int(origin.x / 256)), Int32(minY - Int(origin.y / 256)), Int32(columns), Int32(rows))
     }
 }

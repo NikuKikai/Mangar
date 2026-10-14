@@ -19,7 +19,8 @@ final class MetalBrushEngine {
         let state: MTLBuffer
         let selection: SelectionSnapshot?
         let compiled: CompiledBrush
-        let pickupBase: [TileKey: MTLTexture]
+        var pickupBase: [TileKey: MTLTexture]
+        var origin = SIMD2<Double>.zero
         var processed = 0
         var last: StrokeSample?
         var working: [TileKey: WorkingTile] = [:]
@@ -42,6 +43,7 @@ final class MetalBrushEngine {
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let generate: MTLComputePipelineState
+    private let rebase: MTLComputePipelineState
     private let bin: MTLComputePipelineState
     private let raster: MTLComputePipelineState
     private let fullSelection: MTLTexture
@@ -69,6 +71,7 @@ final class MetalBrushEngine {
             return try device.makeComputePipelineState(function: function)
         }
         generate = try pipeline("brushGenerate")
+        rebase = try pipeline("brushRebase")
         bin = try pipeline("brushBin")
         raster = try pipeline("brushRaster")
         dabBuffer = device.makeBuffer(length: Self.dabCapacity * 64, options: .storageModePrivate)!
@@ -88,7 +91,7 @@ final class MetalBrushEngine {
     }
 
     func update(_ stroke: StrokeCommand, base: [TileKey: MTLTexture],
-                selection: SelectionSnapshot?, width: Int, height: Int) -> Result {
+                selection: SelectionSnapshot?, width: Int, height: Int, boundary: CanvasBoundary? = nil) -> Result {
         if transaction?.id != stroke.id {
             let state = device.makeBuffer(length: 96, options: .storageModeShared)!
             memset(state.contents(), 0, state.length)
@@ -96,6 +99,7 @@ final class MetalBrushEngine {
                 compiled: CompiledBrush(device: device, queue: queue, cache: tipCache, stroke: stroke, capacity: Self.dabCapacity, width: width, height: height), base: base)
         }
         let context = transaction!
+        context.pickupBase.merge(base) { existing,_ in existing }
         guard context.processed < stroke.samples.count else { return result(context) }
         // Only input transport is on the CPU. GPU owns spacing, dynamic evaluation and dabs.
         let initialPrevious = context.last
@@ -117,16 +121,26 @@ final class MetalBrushEngine {
         var previous = initialPrevious
         for start in stride(from: 0, to: inputs.count, by: Self.batchSize) {
             let batch = Array(inputs[start..<min(inputs.count, start + Self.batchSize)])
-            let gpuInputs = batch.map(BrushGPUInput.init)
+            let origin = SIMD2<Double>(floor(batch[0].x/256)*256, floor(batch[0].y/256)*256)
+            if origin != context.origin {
+                var delta = SIMD2<Float>(Float(context.origin.x-origin.x), Float(context.origin.y-origin.y))
+                let encoder = command.makeComputeCommandEncoder()!
+                encoder.setComputePipelineState(rebase); encoder.setBuffer(context.state, offset: 0, index: 0)
+                encoder.setBytes(&delta, length: 8, index: 1)
+                encoder.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+                encoder.endEncoding(); context.origin = origin
+            }
+            let gpuInputs = batch.map { BrushGPUInput($0, origin: origin) }
             let inputBuffer = device.makeBuffer(bytes: gpuInputs, length: gpuInputs.count * MemoryLayout<BrushGPUInput>.stride)!
             let dabs = dabBuffer
             let count = dabCountBuffer
             var uniforms = context.compiled.uniforms
             uniforms.counts.x = UInt32(batch.count)
+            uniforms.clip = (boundary ?? CanvasBoundary(width: width, height: height)).gpuClip(relativeTo: origin)
             if uniforms.medium.x != 0 {
                 uniforms.pickupTiles = pickupWindow.encode(command: command,
                     points: batch + (previous.map { [$0] } ?? []), base: context.pickupBase, layer: stroke.layerID,
-                    selection: context.selection, empty: emptyCanvas, fullSelection: fullSelection, emptySelection: emptySelection)
+                    selection: context.selection, empty: emptyCanvas, fullSelection: fullSelection, emptySelection: emptySelection, origin: origin)
             }
             let generator = command.makeComputeCommandEncoder()!
             generator.label = "Generate brush dabs"
@@ -148,10 +162,10 @@ final class MetalBrushEngine {
             let bounds = CGRect(x: points.map(\.x).min()! - reach, y: points.map(\.y).min()! - reach,
                                 width: points.map(\.x).max()! - points.map(\.x).min()! + reach * 2,
                                 height: points.map(\.y).max()! - points.map(\.y).min()! + reach * 2)
-                .intersection(CGRect(x: 0, y: 0, width: width, height: height))
+
             previous = batch.last
             guard !bounds.isNull, !bounds.isEmpty else { continue }
-            var affected = bounds
+            var affected = (boundary ?? CanvasBoundary(width: width, height: height)).clip(bounds)
             if let selection = context.selection, selection.defaultCoverage == 0 {
                 affected = affected.intersection(selection.bounds)
             }
@@ -185,7 +199,9 @@ final class MetalBrushEngine {
                             sparePaintColor: uniforms.medium.x == 0 ? nil : Self.texture(device, format: .rgba16Float, fill: 0),
                             bounds: gpuBounds)
                     }
-                    uniforms.tile.x = Float(tx * tileSize); uniforms.tile.y = Float(ty * tileSize)
+                    uniforms.tile.x = Float(Double(tx * tileSize)-origin.x); uniforms.tile.y = Float(Double(ty * tileSize)-origin.y)
+                    uniforms.images.z = UInt32(truncatingIfNeeded: tx * tileSize)
+                    uniforms.images.w = UInt32(truncatingIfNeeded: ty * tileSize)
                     let binner = command.makeComputeCommandEncoder()!
                     binner.setComputePipelineState(bin)
                     binner.setBuffer(dabs, offset: 0, index: 0)
@@ -246,8 +262,8 @@ final class MetalBrushEngine {
     }
 
     func finish(_ stroke: StrokeCommand, base: [TileKey: MTLTexture], selection: SelectionSnapshot?,
-                width: Int, height: Int) -> Result {
-        let output = update(stroke, base: base, selection: selection, width: width, height: height)
+                width: Int, height: Int, boundary: CanvasBoundary? = nil) -> Result {
+        let output = update(stroke, base: base, selection: selection, width: width, height: height, boundary: boundary)
         transaction = nil
         return output
     }

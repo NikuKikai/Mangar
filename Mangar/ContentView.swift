@@ -46,12 +46,11 @@ private struct ExportSettingsView: View {
     @State private var preview: UIImage?
 
     private var outputSize: CGSize {
-        cropToContent ? session.page.contentRect.size
-                      : CGSize(width: session.page.width, height: session.page.height)
+        session.renderer.outputBounds(cropToContent:cropToContent).size
     }
 
     private var shownPreview: UIImage? {
-        guard let preview, cropToContent, let source = preview.cgImage else { return preview }
+        guard session.page.comicLayout != nil, let preview, cropToContent, let source = preview.cgImage else { return preview }
         let rect = session.page.contentRect
         let sx = CGFloat(source.width) / CGFloat(session.page.width)
         let sy = CGFloat(source.height) / CGFloat(session.page.height)
@@ -97,6 +96,7 @@ private struct ExportSettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Text(L10n.text("当前页 · PNG"))
                         .font(.system(size: 14, weight: .semibold))
+                    if session.page.comicLayout != nil {
                     Button { cropToContent.toggle() } label: {
                         HStack(spacing: 8) {
                             Image(systemName: cropToContent ? "checkmark.square.fill" : "square")
@@ -104,6 +104,7 @@ private struct ExportSettingsView: View {
                             Text(L10n.text("裁切至内容框"))
                         }
                         .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+                    }
                     }
                     Text(L10n.format("输出：%@ × %@ px", "\(Int(outputSize.width))", "\(Int(outputSize.height))"))
                         .font(.system(size: 12, design: .monospaced))
@@ -208,7 +209,7 @@ struct ContentView: View {
     private var currentProject: ProjectSummary? {
         guard let session, let url = currentProjectURL else { return nil }
         let saved = projects.first { $0.id == ProjectSummary.identity(for: url) }
-        return ProjectSummary(url: url, name: session.manifest.name,
+        return ProjectSummary(url: url, name: session.manifest.name, purpose:session.manifest.purpose,
                               pageCount: session.manifest.logicalPageCount,
                               modifiedAt: saved?.modifiedAt ?? .now,
                               thumbnail: currentPreview ?? saved?.thumbnail)
@@ -232,12 +233,10 @@ struct ContentView: View {
         }
     }
 
-    private func createProject(_ name: String, _ layout: ComicPageLayout, _ pageCount: Int,
-                                _ startingSide: PageStartSide) {
+    private func createProject(_ request: ProjectCreation) {
         guard session?.saveNow() ?? true else { return }
         do {
-            let url = try ProjectLibrary().create(name: name, layout: layout,
-                                                  pageCount: pageCount, startingSide: startingSide)
+            let url = try ProjectLibrary().create(request)
             refreshProjects()
             openProject(url)
         } catch {
@@ -315,6 +314,9 @@ private struct EditorWorkspace: View {
                     CanvasSurfaceRepresentable(session: session)
                         .allowsHitTesting(workspaceView == .canvas)
                         .accessibilityHidden(workspaceView != .canvas)
+                    if workspaceView == .canvas, session.showsRulers {
+                        CanvasRulerOverlay(session:session).allowsHitTesting(false)
+                    }
                     if workspaceView == .pages {
                         PageOverviewView(session: session) { id in
                             if session.selectPage(id) { workspaceView = .canvas }
@@ -322,7 +324,11 @@ private struct EditorWorkspace: View {
                     }
                 }
                 Rectangle().fill(Color.black.opacity(0.45)).frame(width: 1)
-                sidebar
+                VStack(spacing:0) {
+                    CanvasNavigationPanel(session:session)
+                    Rectangle().fill(Color.black.opacity(0.45)).frame(height:1)
+                    sidebar
+                }
                     .disabled(workspaceView == .pages)
                     .frame(width: 224)
                     .background(Color(red: 0.15, green: 0.16, blue: 0.17))
@@ -483,11 +489,13 @@ private struct EditorWorkspace: View {
             }
             .overlay(Rectangle().stroke(.white.opacity(0.16), lineWidth: 1))
             if workspaceView == .canvas {
-                Button { session.renderer.straightenViewport() } label: {
-                    Image(systemName: "rotate.left").frame(width: 22, height: 24)
+                Button { session.showsRulers.toggle() } label: {
+                    Image(systemName:"ruler").frame(width:22,height:24)
+                        .foregroundStyle(session.showsRulers ? Color.accentColor : Color.primary)
                 }
-                .help(L10n.text("画布回正（保持缩放与视口中心）"))
-                .accessibilityLabel(L10n.text("画布回正，保持缩放与视口中心"))
+                .help(L10n.text("显示标尺"))
+                .accessibilityLabel(L10n.text("显示标尺"))
+                .accessibilityAddTraits(session.showsRulers ? [.isSelected] : [])
             }
             Spacer(minLength: 8)
             if workspaceView == .canvas, session.hasSelection {
@@ -513,6 +521,7 @@ private struct EditorWorkspace: View {
             if workspaceView == .pages {
                 Text(L10n.format("%@ 页", "\(session.manifest.logicalPageCount)"))
                     .foregroundStyle(.secondary)
+                if session.manifest.pageStructure == .bookSpreads {
                 HStack(spacing: 1) {
                     ForEach(PageStartSide.allCases, id: \.self) { side in
                         Button { session.setStartingSide(side) } label: {
@@ -527,6 +536,7 @@ private struct EditorWorkspace: View {
                     }
                 }
                 .overlay(Rectangle().stroke(.white.opacity(0.16), lineWidth: 1))
+                }
             } else if session.selectedTool.isSelectionTool {
                 Image(systemName: session.selectedTool == .lassoSelection ? "lasso" : "rectangle.dashed")
                 Text(session.selectedTool == .lassoSelection ? L10n.text("套索选区") : L10n.text("矩形选区"))
@@ -692,6 +702,7 @@ private struct EditorWorkspace: View {
                 .help(L10n.text("选区 · 向右滑动选择矩形或套索"))
             toolButton(.lassoFill, icon: "lasso", name: L10n.text("套索填充"))
             toolButton(.bucket, icon: "paintbrush.fill", name: L10n.text("油漆桶"))
+                .disabled(session.manifest.purpose == .unrestricted)
                 .keyboardShortcut("g", modifiers: [])
             Spacer(minLength: 12)
             ColorPresetControl(color: AppColor(session.brush), selected: !session.usesTransparentColor,
@@ -918,10 +929,11 @@ private struct EditorWorkspace: View {
 
     private var layerList: some View {
         GeometryReader { geometry in
+            let highlighted = visibleContentLayerIDs
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(visibleLayerEntries) { entry in
-                        layerRow(entry)
+                        layerRow(entry, highlighted:highlighted)
                     }
                     Rectangle()
                         .fill(.clear)
@@ -946,7 +958,9 @@ private struct EditorWorkspace: View {
         .padding(.bottom, 3)
     }
 
-    private func layerRow(_ entry: LayerDisplayEntry) -> some View {
+    private var visibleContentLayerIDs: Set<UUID> { session.renderer.visibleContentLayerIDs }
+
+    private func layerRow(_ entry: LayerDisplayEntry, highlighted: Set<UUID>) -> some View {
         let layer = entry.layer
         return HStack(spacing: 0) {
             Button {
@@ -957,7 +971,7 @@ private struct EditorWorkspace: View {
                 Image(systemName: layer.isVisible ? "eye" : "eye.slash")
                     .contentTransition(.identity)
                     .foregroundStyle(session.page.isEffectivelyVisible(layer.id)
-                                     ? Color.primary : Color.gray.opacity(0.55))
+                                     ? (highlighted.contains(layer.id) ? Color.accentColor : Color.primary) : Color.gray.opacity(0.55))
                     .frame(width: 25, height: 35)
             }
             .buttonStyle(ImmediateLayerButtonStyle())
@@ -1224,7 +1238,9 @@ private struct EditorWorkspace: View {
     private func layerThumbnail(_ layer: LayerRecord) -> some View {
         ZStack {
             ThumbnailChecker()
-            if layer.kind == .shape, let shape = layer.shape, !shape.bounds.isEmpty {
+            if layer.kind == .solidColor, let color = layer.solidColor {
+                Rectangle().fill(Color(red: color.red, green: color.green, blue: color.blue, opacity: color.alpha))
+            } else if layer.kind == .shape, let shape = layer.shape, !shape.bounds.isEmpty {
                 Rectangle().fill(Color(red: shape.fill.red, green: shape.fill.green, blue: shape.fill.blue, opacity: shape.fill.alpha))
             } else if let image = session.renderer.thumbnail(for: layer.id) {
                 Image(uiImage: image)
@@ -1236,17 +1252,17 @@ private struct EditorWorkspace: View {
         .frame(width: 24, height: 24)
         .overlay(Rectangle().stroke(Color.white.opacity(0.18), lineWidth: 1))
         .overlay(alignment: .bottomTrailing) {
-            if layer.kind == .shape {
-                Image(systemName: "square.on.circle.fill")
+            if layer.kind == .shape || layer.kind == .solidColor {
+                Image(systemName: layer.kind == .solidColor ? "square.fill" : "square.on.circle.fill")
                     .font(.system(size: 8, weight: .medium))
                     .foregroundStyle(.white)
                     .frame(width: 12, height: 12)
                     .background(Color(red: 0.17, green: 0.18, blue: 0.19))
-                    .help(L10n.text("图形图层"))
+                    .help(layer.kind == .solidColor ? L10n.text("纯色图层") : L10n.text("图形图层"))
                     .allowsHitTesting(false)
             }
         }
-        .accessibilityLabel(layer.kind == .shape ? L10n.text("图形图层缩略图") : L10n.text("绘画图层缩略图"))
+        .accessibilityLabel(layer.kind == .solidColor ? L10n.text("纯色图层缩略图") : (layer.kind == .shape ? L10n.text("图形图层缩略图") : L10n.text("绘画图层缩略图")))
     }
 
     private func layerHandleDrag(_ sourceID: UUID) -> some Gesture {

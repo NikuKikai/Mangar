@@ -226,7 +226,109 @@ struct BrushEngineChecks {
         contentInspector.resolve(tiles:&occupied,bounds:&occupiedBounds,dirty:&occupancyDirty)
         check(occupied[key] === twoDots, "Stale empty measurement cannot remove a newer published texture")
 
-        check(MemoryLayout<BrushGPUInput>.stride == 32 && MemoryLayout<BrushGPUUniforms>.stride == 224, "Metal ABI")
+        let rulerGeometry=CanvasViewportGeometry(size:CGSize(width:800,height:600),zoom:1,rotation:0,pan:CGPoint(x:100,y:40))
+        let finiteRulers=CanvasRulerLayout(geometry:rulerGeometry,boundary:CanvasBoundary(width:512,height:512))
+        let leftRuler=finiteRulers.line(.xEdge)!,topRuler=finiteRulers.line(.yEdge)!
+        check(leftRuler.edge && leftRuler.fixed == 0 && leftRuler.outside.x<0 && topRuler.edge && topRuler.fixed == 0,"Rulers independently prefer visible left and top canvas edges")
+        check(leftRuler.first.y == 0 && leftRuler.last.y == 600 && topRuler.first.x == 0 && topRuler.last.x == 800,"Edge rulers extend past canvas corners to the viewport edges without endpoint padding")
+        let shortEdge=CanvasRulerLayout(geometry:rulerGeometry,boundary:CanvasBoundary(width:512,height:40))
+        check(shortEdge.line(.xEdge)?.edge == false && shortEdge.line(.yEdge)?.edge == true,"Short physical canvas edge falls back independently of the other axis")
+        let rightGeometry=CanvasViewportGeometry(size:CGSize(width:800,height:600),zoom:1,rotation:0,pan:CGPoint(x:-50,y:40))
+        let rightRuler=CanvasRulerLayout(geometry:rightGeometry,boundary:CanvasBoundary(width:512,height:512)).line(.xEdge)!
+        check(rightRuler.edge && rightRuler.fixed == 512 && rightRuler.outside.x>0,"Right edge is used when the preferred left edge is offscreen")
+        let rotatedGeometry=CanvasViewportGeometry(size:CGSize(width:800,height:600),zoom:0.4,rotation:0.63,pan:CGPoint(x:300,y:220))
+        let infiniteRulers=CanvasRulerLayout(geometry:rotatedGeometry,boundary:.unlimited)
+        let floatingX=infiniteRulers.line(.xEdge)!,floatingY=infiniteRulers.line(.yEdge)!
+        let anchorX=rotatedGeometry.canvasPoint(CGPoint(x:24,y:300)),anchorY=rotatedGeometry.canvasPoint(CGPoint(x:400,y:24))
+        check(!floatingX.edge && !floatingY.edge && abs(floatingX.fixed-anchorX.x)<1e-8 && abs(floatingY.fixed-anchorY.y)<1e-8 && abs(floatingX.first.x-floatingX.last.x)>10,"Fallback rulers pass through their viewport anchors while following rotated canvas axes")
+        let rotatedEdgeGeometry=CanvasViewportGeometry(size:CGSize(width:800,height:600),zoom:1,rotation:0.37,pan:CGPoint(x:300,y:100))
+        let rotatedEdge=CanvasRulerLayout(geometry:rotatedEdgeGeometry,boundary:CanvasBoundary(width:512,height:512)).line(.xEdge)!
+        func onViewportEdge(_ p:CGPoint) -> Bool { min(abs(p.x),abs(p.y),abs(p.x-800),abs(p.y-600))<1e-6 }
+        check(rotatedEdge.edge && onViewportEdge(rotatedEdge.first) && onViewportEdge(rotatedEdge.last),"Rotated edge ruler endpoints lie on the viewport boundary")
+        let farTarget=CGPoint(x:-4_294_967_296,y:8_589_934_592)
+        var centered=rotatedGeometry;centered.pan=centered.centeredPan(on:farTarget)
+        let centeredPoint=centered.viewPoint(farTarget)
+        check(abs(centeredPoint.x-400)<1e-6 && abs(centeredPoint.y-300)<1e-6 && centered.zoom == rotatedGeometry.zoom && centered.rotation == rotatedGeometry.rotation,"Navigator centering preserves scale and rotation at far signed coordinates")
+        let originalAnchor=centered.canvasPoint(CGPoint(x:400,y:300))
+        let nativeZoom=centered.zoomedAroundCenter(to:0.5)
+        let preservedAnchor=nativeZoom.canvasPoint(CGPoint(x:400,y:300))
+        check(abs(originalAnchor.x-preservedAnchor.x)<0.00001 && abs(originalAnchor.y-preservedAnchor.y)<0.00001 && nativeZoom.rotation == centered.rotation && nativeZoom.zoom*2 == 1,"100 percent Retina zoom preserves the visible center anchor and rotation")
+        let diamond=CanvasViewportGeometry(size:CGSize(width:100,height:100),zoom:1,rotation:.pi/4,pan:CGPoint(x:50,y:50))
+        check(!diamond.intersects(CGRect(x:60,y:60,width:5,height:5)) && diamond.intersects(CGRect(x:0,y:0,width:5,height:5)),"Visible-content testing rejects rotated AABB corner false positives")
+        check(!CanvasViewportGeometry(size:CGSize(width:100,height:100),zoom:1,rotation:0,pan:.zero).intersects(CGRect(x:100,y:0,width:10,height:10)),"A content bound touching only the viewport edge is not visibly highlighted")
+
+        check(CanvasBoundary.unlimited.contains(CGPoint(x:-500,y:-500)), "Unlimited axes admit signed coordinates")
+        check(CanvasBoundary(width:100,height:nil).contains(CGPoint(x:50,y:-500)) && !CanvasBoundary(width:100,height:nil).contains(CGPoint(x:-1,y:0)), "Each finite axis clips independently")
+        let positiveRay = CanvasBoundary(width:nil,height:nil,startsAtZeroX:true,startsAtZeroY:true)
+        check(positiveRay.contains(CGPoint(x:0,y:0)) && !positiveRay.contains(CGPoint(x:-1,y:0)) && positiveRay.gpuClip(relativeTo:SIMD2(256,256)) == SIMD4(-256,-256,.infinity,.infinity),"Positive infinite ranges share CPU and GPU lower clipping")
+        let negativeStart = CanvasBoundary(width:-100,height:nil,startsAtZeroX:false,startsAtZeroY:false)
+        check(negativeStart.finiteRect == nil && negativeStart.contains(CGPoint(x:-101,y:-500)) && !negativeStart.contains(CGPoint(x:-100,y:0)) && negativeStart.initialRect.maxX == -100,"Negative infinity to fixed negative endpoint has a valid initial viewport")
+        let rangeRoundTrip = try JSONDecoder().decode(CanvasBoundary.self,from:JSONEncoder().encode(negativeStart))
+        check(rangeRoundTrip == negativeStart && negativeStart.clip(CGRect(x:-200,y:-100,width:200,height:200)) == CGRect(x:-200,y:-100,width:100,height:200),"Signed range endpoints persist and clip consistently")
+
+        check(CanvasBoundary.tileIndex(-0.1) == -1 && CanvasBoundary.tileIndex(-256) == -1 && CanvasBoundary.tileIndex(-257) == -2 && MemoryLayout<Int>.size == 8, "Signed 64-bit tile indexing uses floor")
+        let background = PageRecord.blank(width:2048,height:2048,boundary:.unlimited).layers[0]
+        check(background.kind == .solidColor && background.solidColor == .white && background.isLocked && background.shape == nil, "Default background is constant white, with shape kind unused")
+        var signedDot = dot(.binaryPen); signedDot.samples = [StrokeSample(x:-128,y:-128,pressure:1)]
+        let signedResult = engine.finish(signedDot,base:[:],selection:nil,width:2048,height:2048,boundary:.unlimited)
+        let signedImage = image(signedResult)
+        let signedKey = TileKey(layerID:layer,x:-1,y:-1,target:.content)
+        check(signedImage[signedKey] != nil && signedImage[signedKey]!.contains(255), "GPU paints negative world coordinates")
+        let farOffset = 4_294_967_296.0
+        signedDot.id = UUID(); signedDot.samples = [StrokeSample(x:farOffset-128,y:-128,pressure:1)]
+        let farResult = engine.finish(signedDot,base:[:],selection:nil,width:2048,height:2048,boundary:.unlimited)
+        let farImage = image(farResult)
+        let farKey = TileKey(layerID:layer,x:Int(farOffset/256)-1,y:-1,target:.content)
+        check(farImage[farKey] == signedImage[signedKey], "GPU keeps identical pixel precision beyond Float integer range")
+        signedDot.id = UUID(); signedDot.samples = [StrokeSample(x:-128,y:255,pressure:1)]
+        let clippedImage = image(engine.finish(signedDot,base:[:],selection:nil,width:2048,height:256,boundary:CanvasBoundary(width:nil,height:256)))
+        check(clippedImage.filter { $0.key.y >= 1 }.values.allSatisfy { $0.allSatisfy { $0 == 0 } } && clippedImage.keys.contains { $0.x < 0 }, "GPU write clipping preserves the unlimited axis")
+        let fullKey = SelectionTileKey(x:-1,y:-1), secondFull = SelectionTileKey(x:0,y:-1)
+        let flags = SelectionSnapshot(defaultCoverage:0,tiles:[:],tileBounds:[fullKey:CGRect(x:-256,y:-256,width:256,height:256),secondFull:CGRect(x:0,y:-256,width:256,height:256)],bounds:.null,outlineKeys:[],fullKeys:[fullKey,secondFull])
+        check(flags.tiles[fullKey] === flags.tiles[secondFull] && flags.fullKeys.count == 2, "Full selection flags share one constant texture")
+        let flipped = flags.inverted()
+        check(flipped.isInverted && flipped.defaultCoverage == 255 && bytes(flipped.tiles[fullKey]!).allSatisfy { $0 == 0 } && flipped.inverted().tiles[fullKey] === flags.tiles[fullKey], "Selection inversion toggles a flag and preserves constant tiles")
+        let mixedSnapshot = SelectionSnapshot(defaultCoverage:0,tiles:[fullKey:invertedRect],tileBounds:[fullKey:CGRect(x:-256,y:-256,width:256,height:256)],bounds:.null,outlineKeys:[])
+        check(bytes(mixedSnapshot.inverted().tiles[fullKey]!) == bytes(selectedRect), "GPU inverse read cache preserves continuous selection values")
+        let spatial = CanvasTileIndex([signedKey,farKey])
+        check(spatial.query(CGRect(x:-256,y:-256,width:256,height:256)) == [signedKey] && spatial.query(CGRect(x:-512,y:-512,width:farOffset+1024,height:1024)) == [signedKey,farKey], "Sparse spatial lookup works for small viewports and huge world spans")
+        let archive = CanvasTileArchive(); try archive.put(Data(signedImage[signedKey]!),for:signedKey)
+        let clone = try archive.clone(); archive.remove(signedKey)
+        let clonePixels = try clone.read(signedKey)
+        check(clonePixels == Data(signedImage[signedKey]!), "Compressed snapshot survives source tile removal")
+        let projectRoot = FileManager.default.temporaryDirectory.appendingPathComponent("MangarIndexTest-"+UUID().uuidString,isDirectory:true)
+        defer { try? FileManager.default.removeItem(at:projectRoot) }
+        let savedPage = PageRecord.blank(width:2048,height:2048,boundary:.unlimited)
+        let savedKey = TileKey(layerID:savedPage.layers[1].id,x:-1,y:-1,target:.content)
+        let savedManifest = ProjectManifest(name:"Index test",pageIDs:[savedPage.id],selectedPageID:savedPage.id,purpose:.unrestricted,pageStructure:.cards,initialBoundary:.unlimited)
+        let savedStore = ProjectStore(root:projectRoot)
+        try savedStore.save(manifest:savedManifest,page:savedPage,changedTiles:[savedKey:Data(signedImage[signedKey]!)],allTileKeys:[savedKey],tileBounds:[savedKey:CGRect(x:-144,y:-144,width:32,height:32)])
+        let (indexedManifest,indexedPage,indexedTiles) = try savedStore.loadIndex()
+        check(indexedManifest.purpose == .unrestricted && indexedManifest.pageStructure == .cards && indexedPage.boundary == .unlimited && indexedTiles.files.count == 1 && indexedTiles.bounds[savedKey] == CGRect(x:-144,y:-144,width:32,height:32), "Project index preserves independent purpose, page structure, signed keys and content bounds")
+        var changedPixels = Data(signedImage[signedKey]!); changedPixels[(128*256+128)*4+3] = 127
+        try savedStore.save(manifest:savedManifest,page:savedPage,changedTiles:[savedKey:changedPixels],allTileKeys:[savedKey])
+        let retainedPixels = try indexedTiles.read(savedKey)
+        check(retainedPixels == Data(signedImage[signedKey]!), "Owned indexed snapshot survives atomic save and removal of old file generations")
+
+        let lod = try CanvasTileLOD(device:device,queue:queue,library:library,transparent:emptyPaint,white:fullSelection)
+        let parent = CanvasTileLOD.Node(key:TileKey(layerID:layer,x:-1,y:-1,target:.content),level:1)
+        let leaf = CanvasTileLOD.Node(key:signedKey,level:0)
+        let parentTexture = lod.texture(parent,occupied:[parent,leaf]) { $0 == signedKey ? signedResult.tiles[signedKey] : nil }!
+        let readDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat:.rgba8Unorm,width:256,height:256,mipmapped:false);readDesc.storageMode = .shared;readDesc.usage = .shaderRead
+        let parentRead = device.makeTexture(descriptor:readDesc)!, lodCommand = queue.makeCommandBuffer()!, lodCopy = lodCommand.makeBlitCommandEncoder()!
+        lodCopy.copy(from:parentTexture,to:parentRead);lodCopy.endEncoding();await awaitGPU(lodCommand)
+        let mip = bytes(parentRead)
+        check(mip[(192*256+192)*4+3] > 0 && mip[(64*256+64)*4+3] == 0, "GPU parent tile uses signed child quadrants and transparent defaults")
+        let polygon = try PolygonMaskRasterizer(device:device,queue:queue,library:library)
+        let polygonOrigin = SIMD2<Double>(farOffset,-256)
+        let polygonTiles = polygon.rasterize([SIMD2(10,10),SIMD2(20,10),SIMD2(20,20),SIMD2(10,20)],canvasSize:CGSize(width:2048,height:2048),tileSize:256,boundary:.unlimited,origin:polygonOrigin)
+        let sync = queue.makeCommandBuffer()!; await awaitGPU(sync)
+        let polygonKey = SelectionTileKey(x:Int(farOffset/256),y:-1)
+        let polygonRead = selectionTexture([UInt8](repeating:0,count:256*256)), polygonCopyCommand=queue.makeCommandBuffer()!,polygonCopy=polygonCopyCommand.makeBlitCommandEncoder()!
+        polygonCopy.copy(from:polygonTiles[polygonKey]!,to:polygonRead);polygonCopy.endEncoding();await awaitGPU(polygonCopyCommand)
+        check(bytes(polygonRead)[15*256+15] == 255 && bytes(polygonRead)[5*256+5] == 0, "GPU lasso retains pixel precision at far signed origins")
+
+        check(MemoryLayout<BrushGPUInput>.stride == 32 && MemoryLayout<BrushGPUUniforms>.stride == 240, "Metal ABI")
         let lowG = area(paint(dot(.gPen, pressure: 0.15)))
         let highG = area(paint(dot(.gPen)))
         check(highG > lowG * 8, "G pen pressure width")
@@ -423,8 +525,8 @@ struct BrushEngineChecks {
         let regionMaskErase = try await runRegionKernel(maskTarget:true,erases:1)
         check(regionMaskErase[0] == 255, "Bucket R8 transparent color restores white")
 
-        struct TintQuad { var origin = SIMD2<Float>(0,0); var size = SIMD2<Float>(256,256); var viewport = SIMD2<Float>(256,256); var zoom: Float = 1; var rotation: Float = 0; var pan = SIMD2<Float>(0,0) }
-        struct TintUniforms { var origin = SIMD2<Float>(0,0); var canvas = SIMD2<Float>(256,256); var zoom: Float = 1; var phase: Float = 0 }
+        struct TintQuad { var origin = SIMD2<Float>(0,0); var size = SIMD2<Float>(256,256); var viewport = SIMD2<Float>(256,256); var zoom: Float = 1; var rotation: Float = 0; var pan = SIMD2<Float>(0,0); var bounds = SIMD4<Float>(-.infinity,-.infinity,.infinity,.infinity) }
+        struct TintUniforms { var origin = SIMD2<Float>(0,0); var canvas = SIMD2<Float>(256,256); var zoom: Float = 1; var phase: Float = 0; var bounds = SIMD4<Float>(0,0,256,256); var viewport = SIMD2<Float>(256,256); var constant: UInt32 = 0; var padding: UInt32 = 0 }
         let tintInput = device.makeTexture(descriptor: descriptor)!
         var tintValues = [UInt8](repeating: 0, count: 256*256)
         for y in 0..<256 { for x in 0..<256 { tintValues[y*256+x] = [0,64,128,255][x/64] } }
@@ -452,7 +554,7 @@ struct BrushEngineChecks {
         antsPipelineDesc.fragmentFunction = library.makeFunction(name:"selectionOutlineFragment")
         antsPipelineDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
         let antsPipeline = try await device.makeRenderPipelineState(descriptor:antsPipelineDesc)
-        func renderCanvasAnts(_ selected:MTLTexture) async -> [UInt8] {
+        func renderCanvasAnts(_ selected:MTLTexture, zoom:Float = 0.4, rotation:Float = 0, pan:SIMD2<Float> = SIMD2(20.3,25.4)) async -> [UInt8] {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat:.bgra8Unorm,width:128,height:128,mipmapped:false)
             d.storageMode = .shared;d.usage = .renderTarget
             let t = device.makeTexture(descriptor:d)!
@@ -461,13 +563,13 @@ struct BrushEngineChecks {
             pass.colorAttachments[0].clearColor = MTLClearColorMake(0,0,0,0)
             let c = queue.makeCommandBuffer()!, e = c.makeRenderCommandEncoder(descriptor:pass)!
             var q = TintQuad(), u = TintUniforms()
-            let zoom:Float = 0.4, gutter:Float = 0.75/zoom
+            let gutter:Float = 0.75/zoom
             q.origin = SIMD2(-gutter,-gutter);q.size = SIMD2(100+2*gutter,80+2*gutter)
-            q.viewport = SIMD2(128,128);q.zoom = zoom;q.pan = SIMD2(20.3,25.4)
-            u.canvas = SIMD2(100,80);u.zoom = zoom
+            q.viewport = SIMD2(128,128);q.zoom = zoom;q.pan = pan;q.rotation = rotation
+            u.canvas = SIMD2(100,80);u.zoom = zoom;u.bounds = SIMD4(0,0,100,80);u.viewport = SIMD2(128,128)
             e.setRenderPipelineState(antsPipeline);e.setVertexBytes(&q,length:MemoryLayout<TintQuad>.stride,index:0)
             e.setFragmentBytes(&u,length:MemoryLayout<TintUniforms>.stride,index:0)
-            for index in 0..<5 { e.setFragmentTexture(selected,index:index) }
+            for index in 0..<9 { e.setFragmentTexture(selected,index:index) }
             e.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:6);e.endEncoding()
             await awaitGPU(c)
             var pixels = [UInt8](repeating:0,count:128*128*4)
@@ -481,6 +583,52 @@ struct BrushEngineChecks {
         let noCanvasAnts = await renderCanvasAnts(zeroSelection)
         check(stride(from:3,to:noCanvasAnts.count,by:4).allSatisfy { noCanvasAnts[$0] == 0 },
             "Unselected canvas edge has no ants")
+
+        var interiorCoverage = [UInt8](repeating:0,count:256*256)
+        for y in 20..<60 { for x in 40..<60 { interiorCoverage[y*256+x] = 255 } }
+        let interiorSelection = selectionTexture(interiorCoverage)
+        var continuousOutline = true
+        for scale:Float in [0.05,0.12,0.4,0.8] {
+            for angle:Float in [0,0.37,0.785398,1.23] {
+                for phase:Float in [0,0.21,0.48,0.79] {
+                    let offset = SIMD2<Float>(60+phase,25+phase)
+                    let pixels = await renderCanvasAnts(interiorSelection,zoom:scale,rotation:angle,pan:offset)
+                    for step in 1..<20 {
+                        let point = SIMD2<Float>(40,20+40*Float(step)/20)*scale
+                        let screen = SIMD2(point.x*cos(angle)-point.y*sin(angle),point.x*sin(angle)+point.y*cos(angle))+offset
+                        let x=Int(floor(screen.x)),y=Int(floor(screen.y))
+                        if pixels[(y*128+x)*4+3] != 255 { continuousOutline = false }
+                    }
+                }
+            }
+        }
+        check(continuousOutline,"Subpixel internal ants cover screen pixel footprints across scale, rotation and pan phases")
+
+        func renderViewportSelection(_ mask:MTLTexture, mode:UInt32, tinted:Bool = false) async -> [UInt8] {
+        let viewportDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat:.bgra8Unorm,width:128,height:128,mipmapped:false)
+        viewportDesc.storageMode = .shared;viewportDesc.usage = .renderTarget
+        let viewportAntTarget=device.makeTexture(descriptor:viewportDesc)!,viewportAntCommand=queue.makeCommandBuffer()!
+        let viewportPass=MTLRenderPassDescriptor();viewportPass.colorAttachments[0].texture=viewportAntTarget;viewportPass.colorAttachments[0].loadAction = .clear;viewportPass.colorAttachments[0].storeAction = .store;viewportPass.colorAttachments[0].clearColor = MTLClearColorMake(0,0,0,0)
+        let viewportEncoder=viewportAntCommand.makeRenderCommandEncoder(descriptor:viewportPass)!
+        var viewportQuad=TintQuad(),viewportUniforms=TintUniforms()
+        viewportQuad.origin=SIMD2(-64,-64);viewportQuad.size=SIMD2(128,128);viewportQuad.viewport=SIMD2(128,128);viewportQuad.pan=SIMD2(64,64)
+        viewportUniforms.bounds=SIMD4(-.infinity,-.infinity,.infinity,.infinity);viewportUniforms.viewport=SIMD2(128,128);viewportUniforms.constant=mode
+        viewportEncoder.setRenderPipelineState(tinted ? tintPipeline : antsPipeline);viewportEncoder.setVertexBytes(&viewportQuad,length:MemoryLayout<TintQuad>.stride,index:0);viewportEncoder.setFragmentBytes(&viewportUniforms,length:MemoryLayout<TintUniforms>.stride,index:0)
+        for i in 0...8 { viewportEncoder.setFragmentTexture(mask,index:i) }
+        viewportEncoder.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:6);viewportEncoder.endEncoding();await awaitGPU(viewportAntCommand)
+        var viewportAnts=[UInt8](repeating:0,count:128*128*4)
+        viewportAnts.withUnsafeMutableBytes { viewportAntTarget.getBytes($0.baseAddress!,bytesPerRow:128*4,from:MTLRegionMake2D(0,0,128,128),mipmapLevel:0) }
+            return viewportAnts
+        }
+        let viewportAnts = await renderViewportSelection(fullSelection,mode:1)
+        check([(0,64),(127,64),(64,0),(64,127)].allSatisfy { viewportAnts[($0.1*128+$0.0)*4+3] == 255 } && viewportAnts[(64*128+64)*4+3] == 0, "Selection extending beyond signed viewport draws ants at all viewport edges")
+        var screenCoverage = [UInt8](repeating:0,count:256*256)
+        for y in 0..<128 { for x in 0..<128 { screenCoverage[y*256+x] = x < 64 ? 128 : 64 } }
+        let screenMask = selectionTexture(screenCoverage)
+        let clippedAnts = await renderViewportSelection(screenMask,mode:2)
+        check(clippedAnts[(64*128)*4+3] == 255 && clippedAnts[(64*128+127)*4+3] == 0 && clippedAnts[(64*128+32)*4+3] == 0, "Viewport cache draws only selected clipped edges at the half-coverage threshold")
+        let clippedTint = await renderViewportSelection(screenMask,mode:2,tinted:true)
+        check(clippedTint[(64*128+32)*4+3] == 128 && clippedTint[(64*128+96)*4+3] == 64, "Viewport selection cache retains continuous R8 tint values")
 
         let selectionKey = SelectionTileKey(x: 0, y: 0)
         let selection = SelectionSnapshot(defaultCoverage: 0, tiles: [selectionKey: mask],

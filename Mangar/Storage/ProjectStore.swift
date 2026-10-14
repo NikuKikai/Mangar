@@ -11,6 +11,7 @@ private struct PageState: Codable {
     var version = 4
     var page: PageRecord
     var tileFiles: [String: String]
+    var tileBounds: [String: CGRect]? = nil
 }
 
 struct ProjectStore {
@@ -86,6 +87,26 @@ struct ProjectStore {
         return (page, tiles)
     }
 
+    func loadPageIndex(_ id: UUID) throws -> (PageRecord, CanvasTileArchive) {
+        let directory = pageDirectory(id)
+        let state = try JSONDecoder().decode(PageState.self, from: Data(contentsOf: directory.appendingPathComponent("state.json")))
+        guard (2...4).contains(state.version) else { throw StoreError.unsupportedVersion }
+        let archive = CanvasTileArchive()
+        for (name,filename) in state.tileFiles {
+            guard let key = tileKey(name), filename == URL(fileURLWithPath:filename).lastPathComponent, filename.hasSuffix(".tile") else { throw StoreError.missingTile }
+            try archive.importFile(directory.appendingPathComponent("tiles").appendingPathComponent(filename),for:key)
+            archive.bounds[key] = state.tileBounds?[name] ?? CGRect(x:key.x*256,y:key.y*256,width:256,height:256)
+        }
+        return (state.page, archive)
+    }
+
+    func loadIndex() throws -> (ProjectManifest, PageRecord, CanvasTileArchive) {
+        let manifest = try JSONDecoder().decode(ProjectManifest.self,from:Data(contentsOf:root.appendingPathComponent("project.json")))
+        guard manifest.formatVersion == 1, let id = manifest.pageIDs.contains(manifest.selectedPageID) ? manifest.selectedPageID : manifest.pageIDs.first else { throw StoreError.missingPage }
+        let (page, archive) = try loadPageIndex(id)
+        return (manifest,page,archive)
+    }
+
     func requiresFullSnapshot(_ pageID: UUID) -> Bool {
         let directory = pageDirectory(pageID)
         return manager.fileExists(atPath: directory.appendingPathComponent("page.json").path)
@@ -98,7 +119,7 @@ struct ProjectStore {
 
     func save(manifest: ProjectManifest, page: PageRecord, changedTiles: [TileKey: Data],
               allTileKeys: Set<TileKey>, thumbnail: Data? = nil,
-              updateProjectThumbnail: Bool = true, updateManifest: Bool = true) throws {
+              updateProjectThumbnail: Bool = true, updateManifest: Bool = true, tileBounds: [TileKey: CGRect]? = nil) throws {
         let directory = pageDirectory(page.id)
         let tileDirectory = directory.appendingPathComponent("tiles", isDirectory: true)
         try manager.createDirectory(at: tileDirectory, withIntermediateDirectories: true)
@@ -132,7 +153,7 @@ struct ProjectStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         // This one atomic file is the commit point for metadata and every tile reference.
-        try encoder.encode(PageState(page: page, tileFiles: files)).write(to: stateURL,
+        try encoder.encode(PageState(page: page, tileFiles: files, tileBounds: tileBounds.map { Dictionary(uniqueKeysWithValues:$0.map { (tileName($0.key), $0.value) }) })).write(to: stateURL,
                                                                           options: .atomic)
         if updateManifest { try saveManifest(manifest) }
         if let thumbnail {

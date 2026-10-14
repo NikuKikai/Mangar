@@ -70,7 +70,7 @@ struct LayerToneEffect: Codable, Equatable {
 }
 
 struct LayerRecord: Codable, Identifiable, Equatable {
-    enum Kind: String, Codable { case paint, folder, shape }
+    enum Kind: String, Codable { case paint, folder, shape, solidColor }
 
     var id: UUID = UUID()
     var name: String
@@ -84,11 +84,13 @@ struct LayerRecord: Codable, Identifiable, Equatable {
     var hasMask: Bool = false
     var isLocked: Bool = false
     var shape: LayerShape? = nil
+    var solidColor: ShapeColor? = nil
+    var solidBounds: CGRect? = nil
 }
 
 extension LayerRecord {
     private enum CodingKeys: String, CodingKey {
-        case id, name, kind, parentID, isVisible, opacity, blendMode, tone, curves, hasMask, isLocked, shape
+        case id, name, kind, parentID, isVisible, opacity, blendMode, tone, curves, hasMask, isLocked, shape, solidColor, solidBounds
     }
 
     private enum LegacyKeys: String, CodingKey { case paperBounds }
@@ -110,6 +112,8 @@ extension LayerRecord {
         hasMask = try values.decodeIfPresent(Bool.self, forKey: .hasMask) ?? false
         isLocked = try values.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
         shape = try values.decodeIfPresent(LayerShape.self, forKey: .shape)
+        solidColor = try values.decodeIfPresent(ShapeColor.self, forKey: .solidColor)
+        solidBounds = try values.decodeIfPresent(CGRect.self, forKey: .solidBounds)
         if rawKind == "solidWhite", let bounds = try decoder.container(keyedBy: LegacyKeys.self)
             .decodeIfPresent(CGRect.self, forKey: .paperBounds) {
             shape = .rect(bounds: bounds, fill: .white)
@@ -130,6 +134,8 @@ struct PageRecord: Codable, Identifiable, Equatable {
     var name: String
     var width: Int
     var height: Int
+    var canvasBoundary: CanvasBoundary? = nil
+    var boundary: CanvasBoundary { canvasBoundary ?? CanvasBoundary(width: width, height: height) }
     /// Nil for projects created before physical page settings were introduced.
     var comicLayout: ComicPageLayout? = nil
     var isSpread: Bool? = nil
@@ -228,18 +234,17 @@ struct PageRecord: Codable, Identifiable, Equatable {
                       width: Int = CanvasConstants.defaultWidth,
                       height: Int = CanvasConstants.defaultHeight,
                       comicLayout: ComicPageLayout? = nil,
-                      isSpread: Bool = false) -> PageRecord {
+                      isSpread: Bool = false, boundary: CanvasBoundary? = nil) -> PageRecord {
         PageRecord(name: name, width: width,
-                   height: height, comicLayout: comicLayout, isSpread: isSpread,
-                   layers: [LayerRecord(name: L10n.text("背景"), kind: .shape, isLocked: true,
-                       shape: .rect(bounds: CGRect(x: 0, y: 0, width: width, height: height), fill: .white)),
+                   height: height, canvasBoundary: boundary, comicLayout: comicLayout, isSpread: isSpread,
+                   layers: [LayerRecord(name: L10n.text("背景"), kind: .solidColor, isLocked: true, solidColor: .white),
                             LayerRecord(name: L10n.text("图层 1"))])
     }
 }
 
 extension PageRecord {
     private enum CodingKeys: String, CodingKey {
-        case id, name, width, height, comicLayout, isSpread, backgroundSchemaVersion, layers
+        case id, name, width, height, canvasBoundary, comicLayout, isSpread, backgroundSchemaVersion, layers
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -247,6 +252,7 @@ extension PageRecord {
         name = try values.decode(String.self, forKey: .name)
         width = try values.decode(Int.self, forKey: .width)
         height = try values.decode(Int.self, forKey: .height)
+        canvasBoundary = try values.decodeIfPresent(CanvasBoundary.self, forKey: .canvasBoundary)
         comicLayout = try values.decodeIfPresent(ComicPageLayout.self, forKey: .comicLayout)
         isSpread = try values.decodeIfPresent(Bool.self, forKey: .isSpread)
         backgroundSchemaVersion = try values.decodeIfPresent(Int.self, forKey: .backgroundSchemaVersion)
@@ -266,6 +272,9 @@ struct ProjectManifest: Codable {
     var startingSide: PageStartSide = .right
     var spreadPageIDs: [UUID] = []
     var singlePageLayout: ComicPageLayout? = nil
+    var purpose: ProjectPurpose = .book
+    var pageStructure: PageStructure = .bookSpreads
+    var initialBoundary: CanvasBoundary? = nil
 
     var logicalPageCount: Int { pageIDs.reduce(0) { $0 + (spreadPageIDs.contains($1) ? 2 : 1) } }
 
@@ -276,7 +285,7 @@ struct ProjectManifest: Codable {
 
 extension ProjectManifest {
     private enum CodingKeys: String, CodingKey {
-        case formatVersion, name, pageIDs, selectedPageID, startingSide, spreadPageIDs, singlePageLayout
+        case formatVersion, name, pageIDs, selectedPageID, startingSide, spreadPageIDs, singlePageLayout, purpose, pageStructure, initialBoundary
     }
 
     init(from decoder: Decoder) throws {
@@ -288,6 +297,9 @@ extension ProjectManifest {
         startingSide = try values.decodeIfPresent(PageStartSide.self, forKey: .startingSide) ?? .right
         spreadPageIDs = try values.decodeIfPresent([UUID].self, forKey: .spreadPageIDs) ?? []
         singlePageLayout = try values.decodeIfPresent(ComicPageLayout.self, forKey: .singlePageLayout)
+        purpose = try values.decodeIfPresent(ProjectPurpose.self, forKey: .purpose) ?? .book
+        pageStructure = try values.decodeIfPresent(PageStructure.self, forKey: .pageStructure) ?? .bookSpreads
+        initialBoundary = try values.decodeIfPresent(CanvasBoundary.self, forKey: .initialBoundary)
     }
 }
 
@@ -412,7 +424,8 @@ enum EditCommand: Codable {
 
 struct DocumentCheckpoint {
     var page: PageRecord
-    var tiles: [TileKey: Data]
+    var tiles: [TileKey: Data] = [:]
+    var archive: CanvasTileArchive? = nil
     var selection: SelectionSnapshot? = nil
 }
 

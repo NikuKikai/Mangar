@@ -10,6 +10,7 @@ private struct QuadUniforms {
     var zoom: Float
     var rotation: Float
     var pan: SIMD2<Float>
+    var clip: SIMD4<Float> = SIMD4(-.infinity, -.infinity, .infinity, .infinity)
 }
 
 private struct LayerCompositeUniforms {
@@ -20,6 +21,8 @@ private struct LayerCompositeUniforms {
     var tone: SIMD4<Float> = .zero
     var canvasMap: SIMD4<Float> = .zero
     var solidColor: SIMD4<Float> = SIMD4<Float>(repeating: 1)
+    var tonePhase: SIMD2<Float> = .zero
+    var reserved: SIMD2<Float> = .zero
 }
 
 private struct SelectionOpUniforms {
@@ -34,6 +37,10 @@ private struct SelectionOutlineUniforms {
     var canvasSize: SIMD2<Float>
     var zoom: Float
     var phase: Float
+    var bounds: SIMD4<Float> = SIMD4(0,0,256,256)
+    var viewport: SIMD2<Float> = SIMD2(256,256)
+    var constant: UInt32 = 0
+    var padding: UInt32 = 0
 }
 
 private struct RectOutlineUniforms {
@@ -57,6 +64,17 @@ private final class SelectionDisplayLinkTarget: NSObject {
 
 @MainActor
 final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
+    private var tileIndex: CanvasTileIndex?
+    private var archive = CanvasTileArchive()
+    private var residencyClock: UInt64 = 0
+    private var lastUsed: [TileKey: UInt64] = [:]
+    private let residentBudget = 128 * 1024 * 1024
+    private var storageFailure: Error?
+    var onStorageError: ((Error) -> Void)?
+    func checkStorageIntegrity() throws { if let storageFailure { throw storageFailure } }
+    private func reportStorageError(_ error: Error) { storageFailure = error; onStorageError?(error) }
+    private var renderOrigin = SIMD2<Double>.zero
+    private var renderBounds = CGRect.zero
     let device: MTLDevice
     private let queue: MTLCommandQueue
     private let maskFillPipeline: MTLComputePipelineState
@@ -66,6 +84,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private let brushChanges = BrushChangeTracker()
     private let tileContents: TileContentTracker
     private(set) var tileContentBounds: [TileKey: CGRect] = [:]
+    private var tileLOD: CanvasTileLOD!
     private let brushEngine: MetalBrushEngine
     private let polygonRasterizer: PolygonMaskRasterizer
     private let clearLayerPipeline: MTLComputePipelineState
@@ -96,7 +115,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private var emptyThumbnailLayers: Set<UUID> = []
     private(set) var selection: SelectionSnapshot?
     private var lassoPreviewBuffer: MTLBuffer?
-    private var lassoPreviewPoints: [SIMD2<Float>] = []
+    private var lassoPreviewPoints: [SelectionPoint] = []
+    private var selectionMaskTarget: MTLTexture?
     private var selectionPreviewRect: CGRect?
     private var displayLink: CADisplayLink?
     private var displayLinkTarget: SelectionDisplayLinkTarget?
@@ -110,9 +130,30 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     var viewportTintLayerID: UUID?
     var viewportTintTarget: LayerEditTarget = .content
     var page: PageRecord
-    var zoom: CGFloat = 1
-    var rotation: CGFloat = 0
-    var pan: CGPoint = .zero
+    var minimumViewportZoom: CGFloat {
+        if let finite = page.boundary.finiteRect, finite.width <= 16384, finite.height <= 16384 { return 0.05 }
+        return 1e-7
+    }
+    var onViewportChanged: (() -> Void)?
+    var onContentChanged: (() -> Void)?
+    private var viewportNotificationPending = false
+    private var previousViewport: CanvasViewportGeometry?
+    var viewportGeometry: CanvasViewportGeometry {
+        CanvasViewportGeometry(size:view?.bounds.size ?? .zero,zoom:zoom,rotation:rotation,pan:pan)
+    }
+    private func scheduleViewportNotification() {
+        guard !viewportNotificationPending else { return }
+        viewportNotificationPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.viewportNotificationPending = false
+            let geometry = self.viewportGeometry
+            if geometry != self.previousViewport { self.previousViewport = geometry; self.onViewportChanged?() }
+        }
+    }
+    var zoom: CGFloat = 1 { didSet { scheduleViewportNotification() } }
+    var rotation: CGFloat = 0 { didSet { scheduleViewportNotification() } }
+    var pan: CGPoint = .zero { didSet { scheduleViewportNotification() } }
     private var didFit = false
     private var viewportVisible = true
     var isViewportVisible: Bool { viewportVisible }
@@ -234,6 +275,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         self.lassoLinePipeline = try device.makeRenderPipelineState(descriptor: lineDescriptor)
         self.page = page
         super.init()
+        tileLOD = try CanvasTileLOD(device:device,queue:queue,library:library,transparent:newTile(),white:fullMask)
         tileContents.onReady = { [weak self] in self?.resolveTileContentBounds() }
         brushEngine.onTipRadius = { [weak self] id, radius in
             guard let self, self.previewStrokeID == id else { return }
@@ -278,11 +320,11 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
 
     func fitIfNeeded(viewSize: CGSize) {
         guard !didFit, viewSize.width > 0, viewSize.height > 0 else { return }
-        zoom = min(viewSize.width / CGFloat(page.width),
-                   viewSize.height / CGFloat(page.height)) * 0.92
+        let fit = page.boundary.finiteRect.flatMap { $0.width <= 16384 && $0.height <= 16384 ? $0 : nil } ?? page.boundary.initialRect
+        zoom = min(viewSize.width / fit.width, viewSize.height / fit.height) * 0.92
         rotation = 0
-        pan = CGPoint(x: (viewSize.width - CGFloat(page.width) * zoom) / 2,
-                      y: (viewSize.height - CGFloat(page.height) * zoom) / 2)
+        pan = CGPoint(x: (viewSize.width - fit.width * zoom) / 2 - fit.minX * zoom,
+                      y: (viewSize.height - fit.height * zoom) / 2 - fit.minY * zoom)
         didFit = true
         view?.setNeedsDisplay()
     }
@@ -322,7 +364,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func isInsideCanvas(_ point: CGPoint) -> Bool {
-        point.x >= 0 && point.y >= 0 && point.x < CGFloat(page.width) && point.y < CGFloat(page.height)
+        page.boundary.contains(point)
     }
 
     func clearPreview() {
@@ -334,7 +376,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func preview(_ stroke: StrokeCommand) {
-        let result = brushEngine.update(stroke, base: tiles, selection: selection, width: page.width, height: page.height)
+        loadStrokeTiles(stroke)
+        let result = brushEngine.update(stroke, base: tiles, selection: selection, width: page.width, height: page.height, boundary: page.boundary)
         previewTiles = result.tiles
         if previewStrokeID != stroke.id, let last = stroke.samples.last {
             previewTipRadius = CGFloat(stroke.brush.radius(pressure: last.pressure, altitude: last.altitude))
@@ -344,10 +387,14 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func commit(_ stroke: StrokeCommand) {
-        let result = brushEngine.finish(stroke, base: tiles, selection: selection, width: page.width, height: page.height)
+        tileIndex = nil
+        tileLOD?.invalidate()
+        loadStrokeTiles(stroke)
+        let result = brushEngine.finish(stroke, base: tiles, selection: selection, width: page.width, height: page.height, boundary: page.boundary)
         brushChanges.record(result, tiles: tiles, dirty: dirtyBounds)
-        for (key, texture) in result.tiles { tiles[key] = texture }
-        tileContents.record(result.tiles, width: page.width, height: page.height)
+        for (key, texture) in result.tiles { tiles[key] = texture; archive.remove(key) }
+        tileIndex = nil
+        tileContents.record(result.tiles, width: page.width, height: page.height, boundary: page.boundary)
         for (key, bounds) in result.dirtyBounds {
             dirtyBounds[key] = (dirtyBounds[key] ?? .null).union(bounds)
         }
@@ -361,6 +408,9 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func removeTiles(for layerID: UUID) {
+        tileIndex = nil
+        tileLOD?.invalidate()
+        for key in archive.files.keys.filter({ $0.layerID == layerID }) { archive.remove(key) }
         brushChanges.invalidate(layerID: layerID)
         tileContents.invalidate(layerID: layerID)
         tileContentBounds = tileContentBounds.filter { $0.key.layerID != layerID }
@@ -374,6 +424,9 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func removeTiles(for layerID: UUID, target: LayerEditTarget) {
+        tileIndex = nil
+        tileLOD?.invalidate()
+        for key in archive.files.keys.filter({ $0.layerID == layerID && $0.target == target }) { archive.remove(key) }
         brushChanges.invalidate(layerID: layerID)
         tileContents.invalidate(layerID: layerID, target: target)
         tileContentBounds = tileContentBounds.filter { $0.key.layerID != layerID || $0.key.target != target }
@@ -389,13 +442,19 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     func snapshot() -> [TileKey: Data] {
         prepareForReadback()
         var result: [TileKey: Data] = [:]
+        for key in archive.files.keys { do { result[key] = try archive.read(key) } catch { reportStorageError(error) } }
         for (key, texture) in tiles {
             result[key] = bytes(of: texture)
         }
         return result
     }
 
-    var tileKeys: Set<TileKey> { Set(tiles.keys) }
+    var tileKeys: Set<TileKey> { logicalIndex.keys }
+    private var logicalIndex: CanvasTileIndex {
+        if let tileIndex { return tileIndex }
+        let index = CanvasTileIndex(Set(tiles.keys).union(archive.files.keys))
+        tileIndex = index; return index
+    }
     var dirtyTileKeys: Set<TileKey> { Set(dirtyBounds.keys) }
 
     func snapshot(keys: Set<TileKey>) -> [TileKey: Data] {
@@ -403,6 +462,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         var result: [TileKey: Data] = [:]
         for key in keys {
             if let texture = tiles[key] { result[key] = bytes(of: texture) }
+            else { do { result[key] = try archive.read(key) } catch { reportStorageError(error) } }
         }
         return result
     }
@@ -415,23 +475,29 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     private func resolveTileContentBounds() {
+        let previousKeys = Set(tiles.keys)
         let layers = tileContents.resolve(tiles: &tiles, bounds: &tileContentBounds, dirty: &dirtyBounds)
+        for key in previousKeys.subtracting(tiles.keys) { archive.remove(key) }
+        if !layers.isEmpty { tileLOD.invalidate(); tileIndex = nil }
         for id in layers {
             thumbnailCache.removeValue(forKey: id)
             maskThumbnailCache.removeValue(forKey: id)
             emptyThumbnailLayers.remove(id)
         }
-        if !layers.isEmpty { view?.setNeedsDisplay() }
+        if !layers.isEmpty { onContentChanged?(); view?.setNeedsDisplay() }
     }
 
     func clearSavedDirtyTiles() { dirtyBounds.removeAll(); brushChanges.invalidate() }
 
     func markAllTilesDirty() {
         brushChanges.invalidate()
-        for key in tiles.keys { dirtyBounds[key] = .infinite }
+        for key in tileKeys { dirtyBounds[key] = .infinite }
     }
 
     func restore(_ snapshot: [TileKey: Data]) {
+        tileIndex = nil
+        tileLOD?.invalidate()
+        archive = CanvasTileArchive(); lastUsed.removeAll(); storageFailure = nil
         brushEngine.cancel()
         brushChanges.invalidate()
         tileContents.invalidate()
@@ -460,8 +526,64 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             }
             tiles[key] = texture
         }
-        tileContents.record(tiles, width: page.width, height: page.height)
+        tileContents.record(tiles, width: page.width, height: page.height, boundary: page.boundary)
         view?.setNeedsDisplay()
+    }
+
+    func restore(_ source: CanvasTileArchive) throws {
+        let copy = try source.clone()
+        restore([:])
+        archive = copy; tileIndex = nil
+        tileContentBounds = source.bounds
+        view?.setNeedsDisplay()
+    }
+
+    func checkpointArchive() throws -> CanvasTileArchive {
+        prepareForReadback()
+        try checkStorageIntegrity()
+        let result = try archive.clone()
+        for (key,texture) in tiles { try result.put(bytes(of:texture),for:key) }
+        result.bounds = tileContentBounds
+        return result
+    }
+
+    private func ensureResident(_ keys: Set<TileKey>) {
+        residencyClock &+= 1
+        for key in keys {
+            lastUsed[key] = residencyClock
+            guard tiles[key] == nil else { continue }
+            do {
+                guard let data = try archive.read(key) else { continue }
+                let texture = newTile(target:key.target)
+                data.withUnsafeBytes { texture.replace(region:MTLRegionMake2D(0,0,256,256),mipmapLevel:0,withBytes:$0.baseAddress!,bytesPerRow:256*key.target.bytesPerPixel) }
+                tiles[key] = texture
+                tileContents.record([key:texture],width:page.width,height:page.height,boundary:page.boundary)
+            } catch { reportStorageError(error) }
+        }
+    }
+
+    private func loadStrokeTiles(_ stroke: StrokeCommand) {
+        guard !archive.files.isEmpty, let last = stroke.samples.last else { return }
+        let reach = stroke.definition.maximumReach(stroke.brush) + 256
+        // Live input normally adds a short segment. Replay may contain the entire command.
+        let points = previewStrokeID == stroke.id ? Array(stroke.samples.suffix(2)) : stroke.samples
+        let rect = CGRect(x:points.map(\.x).min() ?? last.x,y:points.map(\.y).min() ?? last.y,width:(points.map(\.x).max() ?? last.x)-(points.map(\.x).min() ?? last.x),height:(points.map(\.y).max() ?? last.y)-(points.map(\.y).min() ?? last.y)).insetBy(dx:-reach,dy:-reach)
+        ensureResident(Set(logicalIndex.query(rect).filter { $0.layerID == stroke.layerID && $0.target == stroke.target }))
+    }
+
+    private func trimResidentTiles() {
+        guard previewStrokeID == nil, tiles.reduce(0, { $0 + $1.key.rawSize }) > residentBudget else { return }
+        prepareForReadback()
+        var total = tiles.reduce(0) { $0 + $1.key.rawSize }
+        let candidates = tiles.keys.sorted { (lastUsed[$0] ?? 0) < (lastUsed[$1] ?? 0) }
+        for key in candidates where total > residentBudget {
+            guard let texture = tiles[key], !CGRect(x:key.x*256,y:key.y*256,width:256,height:256).intersects(renderBounds) else { continue }
+            do {
+                try archive.put(bytes(of:texture),for:key)
+                archive.bounds[key] = tileContentBounds[key]
+                tiles.removeValue(forKey:key); total -= key.rawSize
+            } catch { reportStorageError(error); break }
+        }
     }
 
     private static var bytesPerTile: Int { CanvasConstants.tileSize * CanvasConstants.tileSize * 4 }
@@ -483,11 +605,9 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         if let cached = thumbnailCache[layerID] { return cached }
         if emptyThumbnailLayers.contains(layerID) { return nil }
         prepareForReadback()
-        let layerTiles = tiles.filter { $0.key.layerID == layerID && $0.key.target == .content }
-        let tileSize = CanvasConstants.tileSize
         var bounds = tileContentBounds.filter { $0.key.layerID == layerID && $0.key.target == .content }
             .values.reduce(CGRect.null) { $0.union($1) }
-        bounds = bounds.intersection(CGRect(x: 0, y: 0, width: page.width, height: page.height))
+        bounds = page.boundary.clip(bounds)
         guard !bounds.isNull, !bounds.isEmpty else {
             emptyThumbnailLayers.insert(layerID)
             return nil
@@ -508,16 +628,10 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         encoder.setRenderPipelineState(tilePipeline)
         let zoom = Float(min(CGFloat(size - 2) / bounds.width,
                              CGFloat(size - 2) / bounds.height))
-        let pan = SIMD2<Float>(Float((CGFloat(size) - bounds.width * CGFloat(zoom)) / 2 - bounds.minX * CGFloat(zoom)),
-                               Float((CGFloat(size) - bounds.height * CGFloat(zoom)) / 2 - bounds.minY * CGFloat(zoom)))
-        for (key, texture) in layerTiles {
-            let x = key.x * tileSize
-            let y = key.y * tileSize
-            var quad = QuadUniforms(origin: SIMD2<Float>(Float(x), Float(y)),
-                                    size: SIMD2<Float>(Float(min(tileSize, page.width - x)),
-                                                       Float(min(tileSize, page.height - y))),
-                                    viewport: SIMD2<Float>(Float(size), Float(size)),
-                                    zoom: zoom, rotation: 0, pan: pan)
+        let pan = SIMD2<Float>(Float((CGFloat(size) - bounds.width * CGFloat(zoom)) / 2),
+                               Float((CGFloat(size) - bounds.height * CGFloat(zoom)) / 2))
+        for (rect,texture) in displayTiles(layerID:layerID,zoom:zoom,bounds:bounds) {
+            var quad = QuadUniforms(origin:SIMD2(Float(rect.minX-bounds.minX),Float(rect.minY-bounds.minY)),size:SIMD2(Float(rect.width),Float(rect.height)),viewport:SIMD2(Float(size),Float(size)),zoom:zoom,rotation:0,pan:pan,clip:page.boundary.gpuClip(relativeTo:SIMD2(bounds.minX,bounds.minY)))
             encoder.setVertexBytes(&quad, length: MemoryLayout<QuadUniforms>.stride, index: 0)
             encoder.setFragmentTexture(texture, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -590,10 +704,10 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func previewSelection(from start: CGPoint, to end: CGPoint) {
-        let x0 = max(0, min(CGFloat(page.width), min(start.x, end.x)))
-        let y0 = max(0, min(CGFloat(page.height), min(start.y, end.y)))
-        let x1 = max(0, min(CGFloat(page.width), max(start.x, end.x)))
-        let y1 = max(0, min(CGFloat(page.height), max(start.y, end.y)))
+        let x0 = min(start.x, end.x)
+        let y0 = min(start.y, end.y)
+        let x1 = max(start.x, end.x)
+        let y1 = max(start.y, end.y)
         selectionPreviewRect = CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
         updateSelectionAnimation()
         view?.setNeedsDisplay()
@@ -601,10 +715,9 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
 
     func previewLasso(_ points: [SelectionPoint]) {
         selectionPreviewRect = nil
-        lassoPreviewPoints = points.map { SIMD2<Float>(Float($0.x), Float($0.y)) }
+        lassoPreviewPoints = points
         if lassoPreviewPoints.count >= 3 { lassoPreviewPoints.append(lassoPreviewPoints[0]) }
-        lassoPreviewBuffer = lassoPreviewPoints.isEmpty ? nil : device.makeBuffer(bytes: lassoPreviewPoints,
-            length: lassoPreviewPoints.count * MemoryLayout<SIMD2<Float>>.stride)
+        lassoPreviewBuffer = nil
         updateSelectionAnimation()
         view?.setNeedsDisplay()
     }
@@ -624,10 +737,10 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             selection = nil
         case .selectAll:
             selection = SelectionSnapshot(defaultCoverage: 255, tiles: [:], tileBounds: [:],
-                                          bounds: CGRect(x: 0, y: 0, width: page.width, height: page.height),
+                                          bounds: (page.boundary.finiteRect ?? .infinite),
                                           outlineKeys: [])
         case .invert:
-            editSelection(rect: nil, mode: nil)
+            selection = (selection ?? SelectionSnapshot(defaultCoverage: 0, tiles: [:], tileBounds: [:], bounds: .null, outlineKeys: [])).inverted()
         case .lasso(let points, let mode):
             let masks = polygonMasks(points)
             editSelection(rect: nil, mode: mode, masks: masks)
@@ -652,15 +765,13 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     private func selectionKeys(in rect: CGRect) -> Set<SelectionTileKey> {
-        let clipped = rect.intersection(CGRect(x: 0, y: 0, width: page.width, height: page.height))
+        let clipped = page.boundary.clip(rect)
         guard !clipped.isNull, clipped.width > 0, clipped.height > 0 else { return [] }
         let size = CGFloat(CanvasConstants.tileSize)
         let minX = Int(floor(clipped.minX / size))
         let minY = Int(floor(clipped.minY / size))
-        let maxX = min((page.width - 1) / CanvasConstants.tileSize,
-                       Int(ceil(clipped.maxX / size)) - 1)
-        let maxY = min((page.height - 1) / CanvasConstants.tileSize,
-                       Int(ceil(clipped.maxY / size)) - 1)
+        let maxX = Int(ceil(clipped.maxX / size)) - 1
+        let maxY = Int(ceil(clipped.maxY / size)) - 1
         guard minX <= maxX, minY <= maxY else { return [] }
         return Set((minY...maxY).flatMap { y in
             (minX...maxX).map { x in SelectionTileKey(x: x, y: y) }
@@ -683,7 +794,9 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         var newBounds: [SelectionTileKey: CGRect] =
             (mode == .replace || mode == .intersect || mode == nil) ? [:] : (old?.tileBounds ?? [:])
         guard let commandBuffer = queue.makeCommandBuffer() else { return }
-        var reductions: [(SelectionTileKey, MTLBuffer, MTLBuffer)] = []
+        var reductions: [(SelectionTileKey, MTLBuffer, MTLBuffer, MTLBuffer)] = []
+        var fullKeys = (mode == .replace || mode == .intersect) ? Set<SelectionTileKey>() : (old?.fullKeys ?? [])
+        var zeroKeys = (mode == .replace || mode == .intersect) ? Set<SelectionTileKey>() : (old?.zeroKeys ?? [])
         let tileSize = CanvasConstants.tileSize
         let operation: UInt32
         switch mode {
@@ -695,17 +808,36 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         }
         let rectangle = rect ?? .zero
         for key in keys {
+            let tileRect = CGRect(x:key.x*tileSize,y:key.y*tileSize,width:tileSize,height:tileSize)
+            if masks == nil, let rect, rect.contains(tileRect), mode != nil {
+                if mode == .replace || mode == .add || mode == .subtract {
+                    let full = mode != .subtract
+                    newTiles.removeValue(forKey:key); newBounds.removeValue(forKey:key)
+                    fullKeys.remove(key); zeroKeys.remove(key)
+                    if full && newDefault == 0 { fullKeys.insert(key); newBounds[key] = tileRect }
+                    if !full && newDefault == 255 { zeroKeys.insert(key) }
+                    continue
+                }
+                if mode == .intersect {
+                    if let source = old?.tiles[key] { newTiles[key] = source }
+                    else if oldDefault == 255 { fullKeys.insert(key); newBounds[key] = tileRect }
+                    if let bounds = old?.tileBounds[key] { newBounds[key] = bounds }
+                    if old?.fullKeys.contains(key) == true { fullKeys.insert(key) }
+                    continue
+                }
+            }
             let source = old?.tiles[key] ?? (oldDefault == 0 ? emptyMask : fullMask)
             let output = Self.makeMaskTile(device: device, fill: 0)
             let initial = [UInt32(tileSize), UInt32(tileSize), 0, 0]
             guard let boundsBuffer = device.makeBuffer(bytes: initial,
                 length: MemoryLayout<UInt32>.stride * initial.count),
                   let deviationBuffer = device.makeBuffer(bytes: initial, length: 16),
+                  let notFullBuffer = device.makeBuffer(bytes: initial, length: 16),
                 let edit = commandBuffer.makeComputeCommandEncoder() else { continue }
             var uniforms = SelectionOpUniforms(
-                rect: SIMD4<Float>(Float(rectangle.minX), Float(rectangle.minY),
-                                   Float(rectangle.maxX), Float(rectangle.maxY)),
-                tileOrigin: SIMD2<Float>(Float(key.x * tileSize), Float(key.y * tileSize)),
+                rect: SIMD4<Float>(Float(rectangle.minX-Double(key.x * tileSize)), Float(rectangle.minY-Double(key.y * tileSize)),
+                                   Float(rectangle.maxX-Double(key.x * tileSize)), Float(rectangle.maxY-Double(key.y * tileSize))),
+                tileOrigin: .zero,
                 operation: operation, padding: (masks == nil ? 0 : 1) | (oldDefault == 255 ? 2 : 0))
             edit.setComputePipelineState(selectionEditPipeline)
             edit.setTexture(source, index: 0)
@@ -732,14 +864,23 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                         threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
                     deviations.endEncoding()
                     newTiles[key] = output
-                    reductions.append((key, boundsBuffer, deviationBuffer))
+                    reductions.append((key, boundsBuffer, deviationBuffer, notFullBuffer))
+                    if let notFull = commandBuffer.makeComputeCommandEncoder() {
+                        var white: UInt32 = 255
+                        notFull.setComputePipelineState(selectionDeviationPipeline)
+                        notFull.setTexture(output, index: 0); notFull.setBuffer(notFullBuffer, offset: 0, index: 0)
+                        notFull.setBytes(&white, length: 4, index: 1)
+                        notFull.dispatchThreads(MTLSize(width: tileSize, height: tileSize, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                        notFull.endEncoding()
+                    }
                 }
             }
         }
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         guard commandBuffer.status == .completed else { return }
-        for (key, buffer, deviationBuffer) in reductions {
+        for (key, buffer, deviationBuffer, notFullBuffer) in reductions {
+            fullKeys.remove(key); zeroKeys.remove(key)
             let deviation = deviationBuffer.contents().bindMemory(to: UInt32.self, capacity: 4)
             if deviation[0] >= deviation[2] || deviation[1] >= deviation[3] {
                 newTiles.removeValue(forKey: key)
@@ -754,10 +895,15 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                                         height: Int(values[3] - values[1]))
             } else {
                 newBounds.removeValue(forKey: key)
-                if newDefault == 0 { newTiles.removeValue(forKey: key) }
+                newTiles.removeValue(forKey: key)
+                if newDefault == 255 { zeroKeys.insert(key) }
+            }
+            let notFull = notFullBuffer.contents().bindMemory(to: UInt32.self, capacity: 4)
+            if notFull[0] >= notFull[2] || notFull[1] >= notFull[3] {
+                newTiles.removeValue(forKey: key); fullKeys.insert(key)
             }
         }
-        let canvasBounds = CGRect(x: 0, y: 0, width: page.width, height: page.height)
+        let canvasBounds = (page.boundary.finiteRect ?? .infinite)
         let bounds = newDefault == 255 ? canvasBounds
             : newBounds.values.reduce(CGRect.null) { $0.union($1) }
         var outlineKeys: Set<SelectionTileKey> = []
@@ -770,17 +916,22 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                 outlineKeys.insert(SelectionTileKey(x: key.x, y: key.y + 1))
             }
         }
+        for key in fullKeys.union(zeroKeys) { newTiles.removeValue(forKey: key) }
         selection = SelectionSnapshot(defaultCoverage: newDefault, tiles: newTiles,
                                       tileBounds: newBounds, bounds: bounds,
-                                      outlineKeys: outlineKeys)
+                                      outlineKeys: outlineKeys, fullKeys: fullKeys, zeroKeys: zeroKeys)
     }
 
     private func polygonMasks(_ points: [SelectionPoint]) -> [SelectionTileKey: MTLTexture] {
-        polygonRasterizer.rasterize(points.map { SIMD2<Float>(Float($0.x), Float($0.y)) },
-            canvasSize: CGSize(width: page.width, height: page.height), tileSize: CanvasConstants.tileSize)
+        guard let first = points.first else { return [:] }
+        let origin = SIMD2<Double>(floor(first.x/256)*256,floor(first.y/256)*256)
+        return polygonRasterizer.rasterize(points.map { SIMD2<Float>(Float($0.x-origin.x), Float($0.y-origin.y)) },
+            canvasSize: CGSize(width: page.width, height: page.height), tileSize: CanvasConstants.tileSize, boundary: page.boundary, origin:origin)
     }
 
     func commitClear(_ clear: ClearLayerCommand) {
+        tileIndex = nil
+        tileLOD?.invalidate()
         brushChanges.invalidate(layerID: clear.layerID)
         // Missing content tiles are transparent; missing mask tiles are white.
         // Clearing the whole target can therefore release its sparse allocation.
@@ -788,6 +939,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             removeTiles(for: clear.layerID, target: clear.target)
             return
         }
+        ensureResident(Set(archive.files.keys.filter { $0.layerID == clear.layerID && $0.target == clear.target && CGRect(x:$0.x*256,y:$0.y*256,width:256,height:256).intersects(selection.bounds) }))
         guard let command = queue.makeCommandBuffer() else { return }
         let size = CanvasConstants.tileSize
         var pending: [(TileKey, MTLTexture, MTLBuffer)] = []
@@ -819,13 +971,14 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             let bounds = buffer.contents().bindMemory(to: UInt32.self, capacity: 4)
             guard bounds[0] < bounds[2], bounds[1] < bounds[3] else { continue }
             tiles[key] = output
+            tileIndex = nil
             let changed = CGRect(x: key.x * size + Int(bounds[0]), y: key.y * size + Int(bounds[1]),
                 width: Int(bounds[2] - bounds[0]), height: Int(bounds[3] - bounds[1]))
             dirtyBounds[key] = (dirtyBounds[key] ?? .null).union(changed)
         }
         tileContents.record(Dictionary(uniqueKeysWithValues: pending.compactMap { key, output, _ in
             tiles[key].map { current in current === output ? (key, output) : nil } ?? nil
-        }), width: page.width, height: page.height)
+        }), width: page.width, height: page.height, boundary: page.boundary)
         thumbnailCache.removeValue(forKey: clear.layerID)
         emptyThumbnailLayers.remove(clear.layerID)
         maskThumbnailCache.removeValue(forKey: clear.layerID)
@@ -837,6 +990,9 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func commitRegionFill(_ fill: LassoFillCommand, masks: [SelectionTileKey: MTLTexture]) {
+        tileIndex = nil
+        tileLOD.invalidate()
+        ensureResident(Set(masks.keys.map { TileKey(layerID:fill.layerID,x:$0.x,y:$0.y,target:fill.target) }))
         brushChanges.invalidate(layerID: fill.layerID)
         guard !masks.isEmpty, let command = queue.makeCommandBuffer() else { return }
         let size = CanvasConstants.tileSize
@@ -873,13 +1029,14 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             let values = buffer.contents().bindMemory(to: UInt32.self, capacity: 4)
             guard values[0] < values[2], values[1] < values[3] else { continue }
             tiles[key] = output
+            tileIndex = nil
             let changed = CGRect(x: key.x * size + Int(values[0]), y: key.y * size + Int(values[1]),
                                  width: Int(values[2] - values[0]), height: Int(values[3] - values[1]))
             dirtyBounds[key] = (dirtyBounds[key] ?? .null).union(changed)
         }
         tileContents.record(Dictionary(uniqueKeysWithValues: pending.compactMap { key, output, _ in
             tiles[key].map { current in current === output ? (key, output) : nil } ?? nil
-        }), width: page.width, height: page.height)
+        }), width: page.width, height: page.height, boundary: page.boundary)
         maskThumbnailCache.removeValue(forKey: fill.layerID)
         thumbnailCache.removeValue(forKey: fill.layerID)
         emptyThumbnailLayers.remove(fill.layerID)
@@ -887,6 +1044,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        scheduleViewportNotification()
         fitIfNeeded(viewSize: view.bounds.size)
         // Resizing the backing texture must invalidate an on-demand canvas,
         // including after the initial fit has already completed.
@@ -895,22 +1053,37 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         guard viewportVisible else { return }
+        trimResidentTiles()
         guard let pass = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
               let commandBuffer = queue.makeCommandBuffer() else { return }
+        let center = canvasPoint(from: CGPoint(x: view.bounds.midX, y: view.bounds.midY))
+        let origin = SIMD2<Double>(floor(center.x / 256) * 256, floor(center.y / 256) * 256)
+        let mapped = rotatedScaledPoint(CGPoint(x: origin.x, y: origin.y))
         render(pass: pass, commandBuffer: commandBuffer,
                viewport: CGSize(width: drawable.texture.width, height: drawable.texture.height),
                zoom: Float(zoom * view.contentScaleFactor),
                rotation: Float(rotation), includeChecker: true,
-               pan: SIMD2<Float>(Float(pan.x * view.contentScaleFactor),
-                                 Float(pan.y * view.contentScaleFactor)))
+               pan: SIMD2<Float>(Float((pan.x + mapped.x) * view.contentScaleFactor),
+                                 Float((pan.y + mapped.y) * view.contentScaleFactor)), origin: origin)
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }
 
     private func render(pass: MTLRenderPassDescriptor, commandBuffer: MTLCommandBuffer,
                         viewport: CGSize, zoom: Float, rotation: Float,
-                        includeChecker: Bool, pan: SIMD2<Float>) {
+                        includeChecker: Bool, pan: SIMD2<Float>, origin: SIMD2<Double> = .zero) {
+        renderOrigin = origin
+        let c = Double(cos(rotation)), s = Double(sin(rotation)), z = Double(zoom)
+        let corners = [CGPoint.zero, CGPoint(x: viewport.width, y: 0), CGPoint(x: 0, y: viewport.height), CGPoint(x: viewport.width, y: viewport.height)].map { p -> CGPoint in
+            let x = p.x - Double(pan.x), y = p.y - Double(pan.y)
+            return CGPoint(x: (x*c+y*s)/z + origin.x, y: (-x*s+y*c)/z + origin.y)
+        }
+        renderBounds = page.boundary.clip(CGRect(x: corners.map(\.x).min()! - 1, y: corners.map(\.y).min()! - 1, width: corners.map(\.x).max()! - corners.map(\.x).min()! + 2, height: corners.map(\.y).max()! - corners.map(\.y).min()! + 2))
+        let visibleKeys = logicalIndex.query(renderBounds)
+        if zoom > 0.5 { ensureResident(visibleKeys) }
+        let screenSelection = includeChecker ? renderSelectionMask(command:commandBuffer,viewport:viewport,zoom:zoom,rotation:rotation,pan:pan) : nil
+        if includeChecker { selectionMaskTarget = screenSelection }
         let inspectingSelection = includeChecker && showsSelectionTint && selection != nil
         let tintID = includeChecker ? viewportTintLayerID : nil
         let needsCompositing = !inspectingSelection && (tintID != nil || page.layers.contains { $0.hasMask || $0.opacity != 1 || $0.blendMode != .normal || $0.tone?.isEnabled == true || $0.curves?.isEnabled == true })
@@ -920,9 +1093,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         guard !needsCompositing || composite != nil,
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
         let vp = SIMD2<Float>(Float(viewport.width), Float(viewport.height))
-        var paper = QuadUniforms(origin: .zero,
-                                 size: SIMD2<Float>(Float(page.width), Float(page.height)),
-                                 viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
+        var paper = worldQuad(renderBounds, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
         if includeChecker {
             encoder.setRenderPipelineState(checkerPipeline)
             encoder.setVertexBytes(&paper, length: MemoryLayout<QuadUniforms>.stride, index: 0)
@@ -943,14 +1114,12 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         } else {
         for layer in page.layers where page.isEffectivelyVisible(layer.id) {
-            if layer.kind == .shape {
-                guard let shape = layer.shape, !shape.bounds.isEmpty else { continue }
-                let bounds = shape.bounds
-                var background = paper
-                background.origin = SIMD2<Float>(Float(bounds.minX), Float(bounds.minY))
-                background.size = SIMD2<Float>(Float(bounds.width), Float(bounds.height))
+            if layer.kind == .shape || layer.kind == .solidColor {
+                let bounds = layer.kind == .solidColor ? renderBounds.intersection(layer.solidBounds ?? renderBounds) : (layer.shape?.bounds ?? .null)
+                guard !bounds.isNull, !bounds.isEmpty else { continue }
+                var background = worldQuad(bounds, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
                 encoder.setRenderPipelineState(shapePipeline)
-                var color = shape.fill.premultiplied
+                var color = (layer.solidColor ?? layer.shape?.fill ?? .white).premultiplied
                 encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
                 encoder.setVertexBytes(&background, length: MemoryLayout<QuadUniforms>.stride, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -958,16 +1127,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             }
             guard layer.kind == .paint else { continue }
             encoder.setRenderPipelineState(tilePipeline)
-            let keys = Set(tiles.keys.filter { $0.layerID == layer.id && $0.target == .content })
-                .union(previewTiles.keys.filter { $0.layerID == layer.id && $0.target == .content })
-            for key in keys {
-                guard let texture = previewTiles[key] ?? tiles[key] else { continue }
-                let origin = SIMD2<Float>(Float(key.x * CanvasConstants.tileSize),
-                                          Float(key.y * CanvasConstants.tileSize))
-                var quad = QuadUniforms(origin: origin,
-                                        size: SIMD2<Float>(Float(min(CanvasConstants.tileSize, page.width - key.x * CanvasConstants.tileSize)),
-                                                           Float(min(CanvasConstants.tileSize, page.height - key.y * CanvasConstants.tileSize))),
-                                        viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
+            for (rect, texture) in displayTiles(layerID:layer.id,zoom:zoom) {
+                var quad = worldQuad(rect, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
                 encoder.setVertexBytes(&quad, length: MemoryLayout<QuadUniforms>.stride, index: 0)
                 encoder.setFragmentTexture(texture, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -981,6 +1142,79 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                                  rotation: rotation, pan: pan)
         }
         encoder.endEncoding()
+    }
+
+    private func displayTiles(layerID: UUID, target: LayerEditTarget = .content, zoom: Float, bounds: CGRect? = nil) -> [(CGRect,MTLTexture)] {
+        let occupied = tileKeys.union(previewTiles.keys).filter { $0.layerID == layerID && $0.target == target }
+        let level = previewStrokeID != nil ? 0 : max(0,min(30,Int(floor(log2(1 / max(Double(zoom),1e-12))))))
+        let nodes = Set(occupied.map { CanvasTileLOD.Node(key:TileKey(layerID:layerID,x:$0.x >> level,y:$0.y >> level,target:target),level:level) })
+        let tree = Set(occupied.flatMap { key in (0...level).map { level in CanvasTileLOD.Node(key:TileKey(layerID:key.layerID,x:key.x >> level,y:key.y >> level,target:key.target),level:level) } })
+        let visible = bounds ?? renderBounds
+        return nodes.filter { $0.rect.intersects(visible) }.compactMap { node in
+            let texture = tileLOD.texture(node,occupied:tree) { key in
+                if let value = previewTiles[key] ?? tiles[key] { return value }
+                do {
+                    guard let data = try archive.read(key) else { return nil }
+                    let texture = newTile(target:key.target)
+                    data.withUnsafeBytes { texture.replace(region:MTLRegionMake2D(0,0,256,256),mipmapLevel:0,withBytes:$0.baseAddress!,bytesPerRow:256*key.target.bytesPerPixel) }
+                    return texture
+                } catch { reportStorageError(error); return nil }
+            }
+            return texture.map { (node.rect,$0) }
+        }
+    }
+
+    private func worldQuad(_ rect: CGRect, viewport: SIMD2<Float>, zoom: Float, rotation: Float, pan: SIMD2<Float>) -> QuadUniforms {
+        let rect = rect.isNull ? CGRect.zero : rect
+        return QuadUniforms(origin: SIMD2(Float(rect.minX-renderOrigin.x), Float(rect.minY-renderOrigin.y)), size: SIMD2(Float(rect.width), Float(rect.height)), viewport: viewport, zoom: zoom, rotation: rotation, pan: pan, clip: page.boundary.gpuClip(relativeTo: renderOrigin))
+    }
+
+    func outputBounds(cropToContent: Bool = false) -> CGRect {
+        if page.comicLayout != nil { return cropToContent ? page.contentRect : page.boundary.finiteRect! }
+        if let finite = page.boundary.finiteRect { return finite }
+        let content = tileContentBounds.filter { $0.key.target == .content }.values.reduce(CGRect.null) { $0.union($1) }
+        let bounds = content.isNull ? page.boundary.initialRect : content.integral
+        let x0 = page.boundary.hasMinimumX ? 0 : bounds.minX
+        let y0 = page.boundary.hasMinimumY ? 0 : bounds.minY
+        let x1 = page.boundary.width.map { CGFloat($0) } ?? bounds.maxX
+        let y1 = page.boundary.height.map { CGFloat($0) } ?? bounds.maxY
+        return CGRect(x:x0,y:y0,width:x1-x0,height:y1-y0)
+    }
+
+    /// 100% means one image pixel per physical display pixel, including Retina screens.
+    func setNativeZoom() {
+        guard let view,view.bounds.width>0,view.bounds.height>0 else { return }
+        let target=viewportGeometry.zoomedAroundCenter(to:1/max(view.contentScaleFactor,1))
+        zoom=target.zoom;pan=target.pan
+        (view as? CanvasSurface)?.refreshBrushCursor()
+        view.setNeedsDisplay()
+    }
+
+    func centerViewport(on point: CGPoint) {
+        pan = viewportGeometry.centeredPan(on:point)
+        (view as? CanvasSurface)?.refreshBrushCursor()
+        view?.setNeedsDisplay()
+    }
+
+    var navigationBounds: CGRect { outputBounds() }
+
+    func navigationThumbnailPNG() throws -> Data {
+        let oldOrigin = renderOrigin, oldBounds = renderBounds
+        defer { renderOrigin = oldOrigin; renderBounds = oldBounds }
+        return try projectThumbnailPNG()
+    }
+
+    var visibleContentLayerIDs: Set<UUID> {
+        let geometry = viewportGeometry
+        var result: Set<UUID> = []
+        guard geometry.size.width > 0, geometry.size.height > 0 else { return result }
+        for key in logicalIndex.query(geometry.canvasBounds) where key.target == .content && page.isEffectivelyVisible(key.layerID) {
+            guard let bounds = tileContentBounds[key], geometry.intersects(bounds) else { continue }
+            result.insert(key.layerID)
+            var parent = page.layers.first { $0.id == key.layerID }?.parentID
+            while let id = parent { result.insert(id); parent = page.layers.first { $0.id == id }?.parentID }
+        }
+        return result
     }
 
     /// Isolate folder contents before applying folder opacity/blend. Scratch textures
@@ -1068,14 +1302,14 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                 let dpi = Float(page.comicLayout?.dpi ?? 350)
                 uniforms.tone = SIMD4<Float>(dpi / Float(max(1, tone.frequency)),
                     Float(tone.angle * .pi / 180), Float(tone.density), 1)
-                uniforms.canvasMap = SIMD4<Float>(cos(rotation) / max(zoom, 0.000001),
-                    sin(rotation) / max(zoom, 0.000001), pan.x, pan.y)
+                let angle = tone.angle * .pi / 180, period = Double(uniforms.tone.x)
+                uniforms.tonePhase = SIMD2(Float(((renderOrigin.x*cos(angle)+renderOrigin.y*sin(angle))/period).truncatingRemainder(dividingBy:1)), Float(((-renderOrigin.x*sin(angle)+renderOrigin.y*cos(angle))/period).truncatingRemainder(dividingBy:1)))
+                uniforms.canvasMap = SIMD4<Float>(cos(rotation) / max(zoom, 1e-12),
+                    sin(rotation) / max(zoom, 1e-12), pan.x, pan.y)
             }
             if maskPreview {
                 guard let encoder else { return nil }
-                var quad = QuadUniforms(origin: .zero,
-                    size: SIMD2<Float>(Float(page.width), Float(page.height)), viewport: vp,
-                    zoom: zoom, rotation: rotation, pan: pan)
+                var quad = worldQuad(renderBounds, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
                 uniforms.solid = 1
                 encoder.setVertexBytes(&quad, length: MemoryLayout<QuadUniforms>.stride, index: 0)
                 encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerCompositeUniforms>.stride, index: 0)
@@ -1096,14 +1330,12 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                 encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerCompositeUniforms>.stride, index: 0)
                 encoder.setFragmentTexture(child, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-            } else if layer.kind == .shape {
-                guard let shape = layer.shape, !shape.bounds.isEmpty else { continue }
+            } else if layer.kind == .shape || layer.kind == .solidColor {
+                let rect = layer.kind == .solidColor ? renderBounds.intersection(layer.solidBounds ?? renderBounds) : (layer.shape?.bounds ?? .null)
+                guard !rect.isNull, !rect.isEmpty else { continue }
                 guard let encoder else { return nil }
-                let rect = shape.bounds
-                uniforms.solidColor = shape.fill.premultiplied
-                var quad = QuadUniforms(origin: SIMD2<Float>(Float(rect.minX), Float(rect.minY)),
-                    size: SIMD2<Float>(Float(rect.width), Float(rect.height)), viewport: vp,
-                    zoom: zoom, rotation: rotation, pan: pan)
+                uniforms.solidColor = (layer.solidColor ?? layer.shape?.fill ?? .white).premultiplied
+                var quad = worldQuad(rect, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
                 uniforms.solid = 1
                 encoder.setVertexBytes(&quad, length: MemoryLayout<QuadUniforms>.stride, index: 0)
                 encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerCompositeUniforms>.stride, index: 0)
@@ -1113,15 +1345,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             } else {
                 guard let encoder else { return nil }
                 encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LayerCompositeUniforms>.stride, index: 0)
-                let keys = Set(tiles.keys.filter { $0.layerID == layer.id && $0.target == .content })
-                    .union(previewTiles.keys.filter { $0.layerID == layer.id && $0.target == .content })
-                let tileSize = CanvasConstants.tileSize
-                for key in keys {
-                    guard let texture = previewTiles[key] ?? tiles[key] else { continue }
-                    var quad = QuadUniforms(origin: SIMD2<Float>(Float(key.x * tileSize), Float(key.y * tileSize)),
-                        size: SIMD2<Float>(Float(min(tileSize, page.width - key.x * tileSize)),
-                                           Float(min(tileSize, page.height - key.y * tileSize))), viewport: vp,
-                        zoom: zoom, rotation: rotation, pan: pan)
+                for (rect,texture) in displayTiles(layerID:layer.id,zoom:zoom) {
+                    var quad = worldQuad(rect, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
                     encoder.setVertexBytes(&quad, length: MemoryLayout<QuadUniforms>.stride, index: 0)
                     encoder.setFragmentTexture(texture, index: 0)
                     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -1156,14 +1381,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 1, 1, 1)
         guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return nil }
         encoder.setRenderPipelineState(maskViewPipeline)
-        let keys = Set(tiles.keys.filter { $0.layerID == layerID && $0.target == .mask })
-            .union(includePreview ? previewTiles.keys.filter { $0.layerID == layerID && $0.target == .mask } : [])
-        let size = CanvasConstants.tileSize
-        for key in keys {
-            guard let tile = (includePreview ? previewTiles[key] : nil) ?? tiles[key] else { continue }
-            var quad = QuadUniforms(origin: SIMD2<Float>(Float(key.x * size), Float(key.y * size)),
-                size: SIMD2<Float>(Float(size), Float(size)), viewport: SIMD2<Float>(Float(width), Float(height)),
-                zoom: zoom, rotation: rotation, pan: pan)
+        for (rect,tile) in displayTiles(layerID:layerID,target:.mask,zoom:zoom) {
+            var quad = worldQuad(rect,viewport:SIMD2(Float(width),Float(height)),zoom:zoom,rotation:rotation,pan:pan)
             encoder.setVertexBytes(&quad, length: MemoryLayout<QuadUniforms>.stride, index: 0)
             encoder.setFragmentTexture(tile, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -1174,9 +1393,11 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
 
     func maskThumbnail(for layerID: UUID) -> UIImage? {
         if let cached = maskThumbnailCache[layerID] { return cached }
-        let scale = min(48.0 / Double(page.width), 48.0 / Double(page.height))
-        let width = max(1, Int((Double(page.width) * scale).rounded()))
-        let height = max(1, Int((Double(page.height) * scale).rounded()))
+        let bounds = outputBounds()
+        renderOrigin = SIMD2(bounds.minX,bounds.minY); renderBounds = bounds
+        let scale = min(48.0 / bounds.width, 48.0 / bounds.height)
+        let width = max(1, Int((bounds.width * scale).rounded()))
+        let height = max(1, Int((bounds.height * scale).rounded()))
         guard let command = queue.makeCommandBuffer(),
               let texture = renderLayerMask(layerID: layerID, depth: -1, command: command,
                 viewport: CGSize(width: width, height: height), zoom: Float(scale), rotation: 0,
@@ -1213,7 +1434,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         guard !frames.isEmpty else { return }
         encoder.setRenderPipelineState(pageGuidePipeline)
         let padding = CGFloat(max(1, 1 / max(zoom, 0.001)))
-        for (rect, color) in frames {
+        for (worldRect, color) in frames {
+            let rect = worldRect.offsetBy(dx:-renderOrigin.x,dy:-renderOrigin.y)
             var quad = QuadUniforms(origin: SIMD2<Float>(Float(rect.minX - padding), Float(rect.minY - padding)),
                                     size: SIMD2<Float>(Float(rect.width + 2 * padding), Float(rect.height + 2 * padding)),
                                     viewport: viewport, zoom: zoom, rotation: rotation, pan: pan)
@@ -1226,62 +1448,98 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    private func renderSelectionMask(command: MTLCommandBuffer, viewport: CGSize, zoom: Float, rotation: Float, pan: SIMD2<Float>) -> MTLTexture? {
+        guard let selection, !selection.tiles.isEmpty, !renderBounds.isNull else { return nil }
+        let width = max(1,Int(viewport.width)), height = max(1,Int(viewport.height))
+        if selectionMaskTarget?.width != width || selectionMaskTarget?.height != height {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat:.r8Unorm,width:width,height:height,mipmapped:false)
+            d.storageMode = .private; d.usage = [.renderTarget,.shaderRead]
+            selectionMaskTarget = device.makeTexture(descriptor:d)
+        }
+        guard let target = selectionMaskTarget else { return nil }
+        let pass = MTLRenderPassDescriptor(); pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear; pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0,0,0,0)
+        guard let encoder = command.makeRenderCommandEncoder(descriptor:pass) else { return nil }
+        encoder.setRenderPipelineState(maskViewPipeline)
+        let vp = SIMD2<Float>(Float(width),Float(height))
+        if selection.defaultCoverage == 255 {
+            var quad = worldQuad(renderBounds,viewport:vp,zoom:zoom,rotation:rotation,pan:pan)
+            encoder.setVertexBytes(&quad,length:MemoryLayout<QuadUniforms>.stride,index:0); encoder.setFragmentTexture(fullMask,index:0)
+            encoder.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:6)
+        }
+        for (key,texture) in selection.tiles {
+            let rect = CGRect(x:key.x*256,y:key.y*256,width:256,height:256)
+            guard rect.intersects(renderBounds) else { continue }
+            var quad = worldQuad(rect,viewport:vp,zoom:zoom,rotation:rotation,pan:pan)
+            encoder.setVertexBytes(&quad,length:MemoryLayout<QuadUniforms>.stride,index:0); encoder.setFragmentTexture(texture,index:0)
+            encoder.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:6)
+        }
+        encoder.endEncoding(); return target
+    }
+
     private func drawSelectionOutline(encoder: MTLRenderCommandEncoder,
                                       viewport: SIMD2<Float>, zoom: Float,
                                       rotation: Float, pan: SIMD2<Float>) {
         let phase = Float(CACurrentMediaTime() * 3).truncatingRemainder(dividingBy: 2)
         if let selection {
             let size = CanvasConstants.tileSize
-            let c = cos(rotation)
-            let s = sin(rotation)
-            let corners = [SIMD2<Float>(0, 0), SIMD2<Float>(viewport.x, 0),
-                           SIMD2<Float>(0, viewport.y), viewport]
-            let canvasCorners = corners.map { point -> SIMD2<Float> in
-                let delta = point - pan
-                return SIMD2<Float>((delta.x * c + delta.y * s) / zoom,
-                                    (-delta.x * s + delta.y * c) / zoom)
-            }
-            let minX = max(0, Int(floor((canvasCorners.map(\.x).min()! - 2) / Float(size))))
-            let minY = max(0, Int(floor((canvasCorners.map(\.y).min()! - 2) / Float(size))))
-            let maxX = min((page.width - 1) / size,
-                           Int(floor((canvasCorners.map(\.x).max()! + 2) / Float(size))))
-            let maxY = min((page.height - 1) / size,
-                           Int(floor((canvasCorners.map(\.y).max()! + 2) / Float(size))))
-            if minX <= maxX, minY <= maxY {
-                let fallback = selection.defaultCoverage == 0 ? emptyMask : fullMask
+            let visible = renderBounds
+            guard !visible.isNull else { return }
+            let minX = Int(floor((visible.minX - 2) / Double(size)))
+            let minY = Int(floor((visible.minY - 2) / Double(size)))
+            let maxX = Int(floor((visible.maxX + 2) / Double(size)))
+            let maxY = Int(floor((visible.maxY + 2) / Double(size)))
+            let selectedTiles = selection.tiles
+            let constantSelection = selectedTiles.isEmpty && selection.defaultCoverage == 255
+            if constantSelection || selectionMaskTarget != nil {
                 encoder.setRenderPipelineState(showsSelectionTint ? selectionTintPipeline : selectionOutlinePipeline)
-                for y in minY...maxY {
-                    for x in minX...maxX {
-                        let key = SelectionTileKey(x: x, y: y)
-                        if selection.defaultCoverage == 0 &&
-                           (showsSelectionTint ? selection.tileBounds[key] == nil : !selection.outlineKeys.contains(key)) { continue }
-                        let origin = SIMD2<Float>(Float(x * size), Float(y * size))
-                        let gutter = showsSelectionTint ? Float(0) : 0.75 / max(zoom, 0.000001)
-                        let left = x == 0 ? gutter : 0, top = y == 0 ? gutter : 0
-                        let right = (x + 1) * size >= page.width ? gutter : 0
-                        let bottom = (y + 1) * size >= page.height ? gutter : 0
-                        var quad = QuadUniforms(origin: origin - SIMD2(left, top),
-                            size: SIMD2<Float>(Float(min(size, page.width - x * size)) + left + right,
-                                               Float(min(size, page.height - y * size)) + top + bottom),
-                            viewport: viewport, zoom: zoom, rotation: rotation, pan: pan)
-                        var uniforms = SelectionOutlineUniforms(
-                            tileOrigin: origin,
-                            canvasSize: SIMD2<Float>(Float(page.width), Float(page.height)),
-                            zoom: zoom, phase: phase)
-                        encoder.setVertexBytes(&quad, length: MemoryLayout<QuadUniforms>.stride, index: 0)
-                        encoder.setFragmentBytes(&uniforms,
-                            length: MemoryLayout<SelectionOutlineUniforms>.stride, index: 0)
-                        encoder.setFragmentTexture(selection.tiles[key] ?? fallback, index: 0)
-                        encoder.setFragmentTexture(selection.tiles[SelectionTileKey(x: x - 1, y: y)] ?? fallback, index: 1)
-                        encoder.setFragmentTexture(selection.tiles[SelectionTileKey(x: x + 1, y: y)] ?? fallback, index: 2)
-                        encoder.setFragmentTexture(selection.tiles[SelectionTileKey(x: x, y: y - 1)] ?? fallback, index: 3)
-                        encoder.setFragmentTexture(selection.tiles[SelectionTileKey(x: x, y: y + 1)] ?? fallback, index: 4)
-                        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-                    }
+                var quad = worldQuad(visible.insetBy(dx: -Double(0.75 / max(zoom,1e-12)), dy: -Double(0.75 / max(zoom,1e-12))), viewport: viewport, zoom: zoom, rotation: rotation, pan: pan)
+                quad.clip = SIMD4(-.infinity,-.infinity,.infinity,.infinity)
+                var uniforms = SelectionOutlineUniforms(tileOrigin: .zero, canvasSize: SIMD2(.infinity,.infinity), zoom: zoom, phase: phase, bounds: page.boundary.gpuClip(relativeTo: renderOrigin), viewport: viewport, constant: constantSelection ? 1 : (zoom < 0.05 ? 3 : 2))
+                encoder.setVertexBytes(&quad,length:MemoryLayout<QuadUniforms>.stride,index:0)
+                encoder.setFragmentBytes(&uniforms,length:MemoryLayout<SelectionOutlineUniforms>.stride,index:0)
+                for index in 0...8 { encoder.setFragmentTexture(selectionMaskTarget ?? fullMask,index:index) }
+                encoder.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:6)
+            }
+            if !constantSelection, !showsSelectionTint, zoom >= 0.05, minX <= maxX, minY <= maxY {
+                let fallback = selection.defaultCoverage == 0 ? emptyMask : fullMask
+                encoder.setRenderPipelineState(selectionOutlinePipeline)
+                let fullKeys = selection.fullKeys, zeroKeys = selection.zeroKeys
+                func constantCoverage(_ key:SelectionTileKey) -> UInt8? {
+                    if fullKeys.contains(key) { return 255 }
+                    if zeroKeys.contains(key) { return 0 }
+                    return selectedTiles[key] == nil ? selection.defaultCoverage : nil
+                }
+                for key in selection.outlineKeys where key.x >= minX && key.x <= maxX && key.y >= minY && key.y <= maxY {
+                    let x = key.x, y = key.y
+                    if let constant = constantCoverage(key), (-1...1).allSatisfy({ dy in (-1...1).allSatisfy { dx in constantCoverage(SelectionTileKey(x:x+dx,y:y+dy)) == constant } }) { continue }
+                    let origin = SIMD2<Float>(Float(Double(x * size)-renderOrigin.x), Float(Double(y * size)-renderOrigin.y))
+                    var quad = QuadUniforms(origin:origin,size:SIMD2<Float>(repeating:Float(size)),
+                        viewport:viewport,zoom:zoom,rotation:rotation,pan:pan)
+                    var uniforms = SelectionOutlineUniforms(
+                        tileOrigin: origin,
+                        canvasSize: SIMD2<Float>(Float(page.width), Float(page.height)),
+                        zoom: zoom, phase: phase, bounds: page.boundary.gpuClip(relativeTo: renderOrigin), viewport: viewport)
+                    encoder.setVertexBytes(&quad, length: MemoryLayout<QuadUniforms>.stride, index: 0)
+                    encoder.setFragmentBytes(&uniforms,
+                        length: MemoryLayout<SelectionOutlineUniforms>.stride, index: 0)
+                    encoder.setFragmentTexture(selectedTiles[key] ?? fallback, index: 0)
+                    encoder.setFragmentTexture(selectedTiles[SelectionTileKey(x: x - 1, y: y)] ?? fallback, index: 1)
+                    encoder.setFragmentTexture(selectedTiles[SelectionTileKey(x: x + 1, y: y)] ?? fallback, index: 2)
+                    encoder.setFragmentTexture(selectedTiles[SelectionTileKey(x: x, y: y - 1)] ?? fallback, index: 3)
+                    encoder.setFragmentTexture(selectedTiles[SelectionTileKey(x: x, y: y + 1)] ?? fallback, index: 4)
+                    encoder.setFragmentTexture(selectedTiles[SelectionTileKey(x:x-1,y:y-1)] ?? fallback,index:5)
+                    encoder.setFragmentTexture(selectedTiles[SelectionTileKey(x:x+1,y:y-1)] ?? fallback,index:6)
+                    encoder.setFragmentTexture(selectedTiles[SelectionTileKey(x:x-1,y:y+1)] ?? fallback,index:7)
+                    encoder.setFragmentTexture(selectedTiles[SelectionTileKey(x:x+1,y:y+1)] ?? fallback,index:8)
+                    encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
                 }
             }
         }
-        if lassoPreviewPoints.count >= 2, let points = lassoPreviewBuffer {
+        if lassoPreviewPoints.count >= 2 {
+            let positions = lassoPreviewPoints.map { SIMD2<Float>(Float($0.x-renderOrigin.x),Float($0.y-renderOrigin.y)) }
+            guard let points = device.makeBuffer(bytes:positions,length:positions.count * MemoryLayout<SIMD2<Float>>.stride) else { return }
             var quad = QuadUniforms(origin: .zero, size: .zero, viewport: viewport,
                                    zoom: zoom, rotation: rotation, pan: pan)
             var linePhase = phase
@@ -1293,10 +1551,10 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                                    vertexCount: (lassoPreviewPoints.count - 1) * 6)
         }
         if let rect = selectionPreviewRect, rect.width >= 0.5, rect.height >= 0.5 {
-            let x0 = Float(floor(rect.minX + 0.5))
-            let y0 = Float(floor(rect.minY + 0.5))
-            let x1 = Float(floor(rect.maxX + 0.5))
-            let y1 = Float(floor(rect.maxY + 0.5))
+            let x0 = Float(floor(rect.minX + 0.5)-renderOrigin.x)
+            let y0 = Float(floor(rect.minY + 0.5)-renderOrigin.y)
+            let x1 = Float(floor(rect.maxX + 0.5)-renderOrigin.x)
+            let y1 = Float(floor(rect.maxY + 0.5)-renderOrigin.y)
             guard x1 > x0, y1 > y0 else { return }
             var quad = QuadUniforms(origin: SIMD2<Float>(x0 - 1, y0 - 1),
                                     size: SIMD2<Float>(x1 - x0 + 2, y1 - y0 + 2),
@@ -1327,7 +1585,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         render(pass: pass, commandBuffer: commandBuffer,
                viewport: CGSize(width: 1, height: 1), zoom: 1, rotation: 0,
                includeChecker: false,
-               pan: SIMD2<Float>(-Float(floor(point.x)), -Float(floor(point.y))))
+               pan: .zero, origin: SIMD2(floor(point.x), floor(point.y)))
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         var pixel = [UInt8](repeating: 0, count: 4)
@@ -1359,10 +1617,10 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func exportPNG(cropToContent: Bool) throws -> Data {
-        let bounds = cropToContent ? page.contentRect : CGRect(x: 0, y: 0,
-                                                                width: page.width, height: page.height)
+        let bounds = outputBounds(cropToContent: cropToContent)
         let width = Int(bounds.width)
         let height = Int(bounds.height)
+        guard width > 0, height > 0, width <= 16384, height <= 16384, width * height <= 64_000_000 else { throw RendererError.exportFailed }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
         descriptor.storageMode = .shared
@@ -1377,7 +1635,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         render(pass: pass, commandBuffer: commandBuffer,
                viewport: CGSize(width: width, height: height),
                zoom: 1, rotation: 0, includeChecker: false,
-               pan: SIMD2<Float>(-Float(bounds.minX), -Float(bounds.minY)))
+               pan: .zero, origin: SIMD2(bounds.minX, bounds.minY))
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         let rowBytes = width * 4
@@ -1402,9 +1660,10 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func projectThumbnailPNG() throws -> Data {
-        let scale = min(320.0 / Double(page.width), 320.0 / Double(page.height), 1)
-        let width = max(1, Int((Double(page.width) * scale).rounded()))
-        let height = max(1, Int((Double(page.height) * scale).rounded()))
+        let bounds = outputBounds()
+        let scale = min(320.0 / bounds.width, 320.0 / bounds.height, 1)
+        let width = max(1, Int((bounds.width * scale).rounded()))
+        let height = max(1, Int((bounds.height * scale).rounded()))
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
         descriptor.storageMode = .shared
@@ -1418,7 +1677,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         render(pass: pass, commandBuffer: commandBuffer,
                viewport: CGSize(width: width, height: height), zoom: Float(scale),
-               rotation: 0, includeChecker: false, pan: .zero)
+               rotation: 0, includeChecker: false, pan: .zero, origin: SIMD2(bounds.minX, bounds.minY))
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         let rowBytes = width * 4

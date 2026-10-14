@@ -4,6 +4,7 @@ import UIKit
 struct ProjectSummary: Identifiable {
     let url: URL
     let name: String
+    let purpose: ProjectPurpose
     let pageCount: Int
     let modifiedAt: Date
     let thumbnail: Data?
@@ -44,23 +45,25 @@ struct ProjectLibrary {
             let modified = (try? manifestURL.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate ?? .distantPast
             let thumbnail = try? Data(contentsOf: root.appendingPathComponent("thumbnail.png"))
-            return ProjectSummary(url: root, name: manifest.name,
+            return ProjectSummary(url: root, name: manifest.name, purpose:manifest.purpose,
                                   pageCount: manifest.logicalPageCount,
                                   modifiedAt: modified, thumbnail: thumbnail)
         }.sorted { $0.modifiedAt > $1.modifiedAt }
     }
 
-    func create(name: String, layout: ComicPageLayout, pageCount: Int,
-                startingSide: PageStartSide = .right) throws -> URL {
+    func create(_ request: ProjectCreation) throws -> URL {
+        let name = request.name, pageCount = request.pageCount, startingSide = request.startingSide
+        let layout = request.layout
         let directory = documents.appendingPathComponent("Projects", isDirectory: true)
         try manager.createDirectory(at: directory, withIntermediateDirectories: true)
         let root = directory.appendingPathComponent(UUID().uuidString + ".mangar", isDirectory: true)
         let store = ProjectStore(root: root)
-        let width = layout.canvasWidthPixels
-        let height = layout.canvasHeightPixels
-        let first = PageRecord.blank(width: width, height: height, comicLayout: layout)
+        let width = layout?.canvasWidthPixels ?? Int(request.boundary.initialRect.width)
+        let height = layout?.canvasHeightPixels ?? Int(request.boundary.initialRect.height)
+        let first = PageRecord.blank(width: width, height: height, comicLayout: layout, boundary: request.boundary)
         var manifest = ProjectManifest(name: name, pageIDs: [first.id], selectedPageID: first.id,
-                                       startingSide: startingSide, singlePageLayout: layout)
+                                       startingSide: startingSide, singlePageLayout: layout, purpose: request.purpose,
+                                       pageStructure: request.purpose == .book ? .bookSpreads : .cards, initialBoundary: request.boundary)
         let scale = min(320.0 / Double(width), 320.0 / Double(height), 1)
         let thumbnailSize = CGSize(width: max(1, Int((Double(width) * scale).rounded())),
                                    height: max(1, Int((Double(height) * scale).rounded())))
@@ -74,7 +77,7 @@ struct ProjectLibrary {
             if pageCount > 1 {
                 for number in 2...pageCount {
                     let page = PageRecord.blank(name: L10n.format("第 %@ 页", "\(number)"), width: width,
-                                                height: height, comicLayout: layout)
+                                                height: height, comicLayout: layout, boundary: request.boundary)
                     manifest.pageIDs.append(page.id)
                     try store.save(manifest: manifest, page: page,
                                    changedTiles: [:], allTileKeys: [], thumbnail: thumbnail)

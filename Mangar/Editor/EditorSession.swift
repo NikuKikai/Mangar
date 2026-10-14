@@ -37,6 +37,11 @@ final class EditorSession: ObservableObject {
     @Published var activeModifiers: Set<EditorModifier> = []
     @Published var message: String?
     @Published var exportURL: URL?
+    @Published private(set) var viewportRevision = 0
+    @Published private(set) var contentRevision = 0
+    @Published var showsRulers = UserDefaults.standard.bool(forKey:"MangarShowsRulers") {
+        didSet { UserDefaults.standard.set(showsRulers,forKey:"MangarShowsRulers") }
+    }
     @Published private(set) var historyRevision = 0
     @Published private(set) var needsSave = false
     @Published private(set) var pageThumbnails: [UUID: UIImage] = [:]
@@ -60,16 +65,19 @@ final class EditorSession: ObservableObject {
 
     init(projectURL: URL) throws {
         let store = ProjectStore(root: projectURL)
-        let loaded = try store.load()
-        let renderer = try MetalCanvasRenderer(page: loaded.page)
-        renderer.restore(loaded.tiles)
+        let (manifest, initialPage, initialTiles) = try store.loadIndex()
+        let renderer = try MetalCanvasRenderer(page: initialPage)
+        try renderer.restore(initialTiles)
         self.store = store
-        self.page = loaded.page
-        self.manifest = loaded.manifest
+        self.page = initialPage
+        self.manifest = manifest
         self.renderer = renderer
-        self.selectedLayerIDs = loaded.page.layers.last.map { [$0.id] } ?? []
-        self.history = CommandHistory(checkpoint: DocumentCheckpoint(page: loaded.page,
-                                                                      tiles: loaded.tiles))
+        self.selectedLayerIDs = initialPage.layers.last.map { [$0.id] } ?? []
+        self.history = CommandHistory(checkpoint: DocumentCheckpoint(page: initialPage,
+                                                                      archive: initialTiles))
+        renderer.onViewportChanged = { [weak self] in self?.viewportRevision += 1 }
+        renderer.onContentChanged = { [weak self] in self?.contentRevision += 1 }
+        renderer.onStorageError = { [weak self] error in self?.message = error.localizedDescription }
         do {
             try BrushResourceStore.shared.update(brush)
             brushResources = try BrushResourceStore.shared.resources()
@@ -235,8 +243,10 @@ final class EditorSession: ObservableObject {
     func appendStroke(at point: CGPoint, pressure: CGFloat, timestamp: TimeInterval,
                       altitude: CGFloat, azimuth: CGFloat, renderPreview: Bool = true) {
         guard let last = activeStroke?.samples.last else { return }
-        let x = min(max(0, point.x), CGFloat(page.width - 1))
-        let y = min(max(0, point.y), CGFloat(page.height - 1))
+        let lowerX = page.boundary.hasMinimumX ? max(0,point.x) : point.x
+        let x = page.boundary.width.map { min(lowerX,CGFloat($0-1)) } ?? lowerX
+        let lowerY = page.boundary.hasMinimumY ? max(0,point.y) : point.y
+        let y = page.boundary.height.map { min(lowerY,CGFloat($0-1)) } ?? lowerY
         let next = sample(CGPoint(x: x, y: y), pressure,
                           time: max(last.time, timestamp - strokeStartTime), altitude: altitude, azimuth: azimuth)
         if next == last { return }
@@ -328,10 +338,10 @@ final class EditorSession: ObservableObject {
             }
             return
         }
-        let x0 = max(0, min(Double(page.width), min(start.x, point.x)))
-        let y0 = max(0, min(Double(page.height), min(start.y, point.y)))
-        let x1 = max(0, min(Double(page.width), max(start.x, point.x)))
-        let y1 = max(0, min(Double(page.height), max(start.y, point.y)))
+        let x0 = min(start.x, point.x)
+        let y0 = min(start.y, point.y)
+        let x1 = max(start.x, point.x)
+        let y1 = max(start.y, point.y)
         guard x1 - x0 >= 0.5, y1 - y0 >= 0.5 else { return }
         perform(.selection(.rectangle(SelectionRect(x: x0, y: y0,
                                                      width: x1 - x0, height: y1 - y0), mode)))
@@ -458,7 +468,7 @@ final class EditorSession: ObservableObject {
     var hasSelection: Bool { renderer.selection != nil }
 
     func fillBucket(at point: CGPoint) {
-        guard !isFilling, renderer.isInsideCanvas(point), let layer = selectedLayer,
+        guard manifest.purpose != .unrestricted, !isFilling, renderer.isInsideCanvas(point), let layer = selectedLayer,
               (selectedEditTarget == .mask ? layer.hasMask : layer.kind == .paint),
               page.isEffectivelyVisible(layer.id), !page.isEffectivelyLocked(layer.id) else { return }
         endStroke(); endLayerPropertyEdit(); cancelSelection()
@@ -722,6 +732,15 @@ final class EditorSession: ObservableObject {
     func addPage(at index: Int, isSpread: Bool) {
         guard (0...manifest.pageIDs.count).contains(index), saveNow() else { return }
         do {
+            if manifest.pageStructure == .cards {
+                let newPage = PageRecord.blank(name: L10n.text("新页面"), width: page.width, height: page.height,
+                    boundary: manifest.initialBoundary ?? page.boundary)
+                let preview = try MetalCanvasRenderer(page: newPage).projectThumbnailPNG()
+                var updated = manifest
+                try store.insertPage(newPage, at: index, into: &updated, thumbnail: preview)
+                manifest = updated; pageThumbnails[newPage.id] = UIImage(data: preview)
+                return
+            }
             var layout = manifest.singlePageLayout ?? page.comicLayout
             layout?.pageSpan = isSpread ? 2 : 1
             let singleWidth = page.isDoublePage ? Int(page.contentRect.width) / 2 : page.width
@@ -798,7 +817,7 @@ final class EditorSession: ObservableObject {
             // Keep an editable project when deleting its last page.
             let outputs: [ConvertedPage] = manifest.pageIDs.count == 1 ?
                 [ConvertedPage(page: .blank(width: page.width, height: page.height,
-                    comicLayout: page.comicLayout, isSpread: page.isDoublePage), tiles: [:])] : []
+                    comicLayout: page.comicLayout, isSpread: page.isDoublePage, boundary: page.boundary), tiles: [:])] : []
             try replacePages([id], outputs: outputs)
         } catch { message = L10n.format("删除失败：%@", "\(error.localizedDescription)") }
     }
@@ -846,11 +865,11 @@ final class EditorSession: ObservableObject {
         cancelSelection()
         guard persist() else { return false }
         do {
-            let (newPage, tiles) = try store.loadPage(id)
+            let (newPage, archive) = try store.loadPageIndex(id)
             var updated = manifest
             updated.selectedPageID = id
             try store.saveManifest(updated)
-            switchTo(page: newPage, tiles: tiles, manifest: updated)
+            try switchTo(page: newPage, archive: archive, manifest: updated)
             needsSave = true
             return persist()
         } catch {
@@ -880,9 +899,9 @@ final class EditorSession: ObservableObject {
         // Generate missing thumbnails lazily for older projects, using a separate
         // renderer so the open page, its history and viewport stay intact.
         do {
-            let (record, tiles) = try store.loadPage(id)
+            let (record, tiles) = try store.loadPageIndex(id)
             let thumbnailRenderer = try MetalCanvasRenderer(page: record)
-            thumbnailRenderer.restore(tiles)
+            try thumbnailRenderer.restore(tiles)
             let data = try thumbnailRenderer.projectThumbnailPNG()
             try store.savePageThumbnail(data, pageID: id)
             pageThumbnails[id] = UIImage(data: data)
@@ -925,8 +944,11 @@ final class EditorSession: ObservableObject {
         if history.commands.count > history.limit {
             let currentCursor = history.cursor
             rebuild(to: 1)
-            history.checkpoint = DocumentCheckpoint(page: page, tiles: renderer.snapshot(),
-                                                    selection: renderer.selection)
+            do { history.checkpoint = DocumentCheckpoint(page: page, archive: try renderer.checkpointArchive(), selection: renderer.selection) } catch {
+                rebuild(to:currentCursor)
+                message = error.localizedDescription; historyRevision += 1; needsSave = true
+                return
+            }
             history.commands.removeFirst()
             history.cursor = currentCursor - 1
             rebuild(to: history.cursor)
@@ -940,7 +962,7 @@ final class EditorSession: ObservableObject {
     private func rebuild(to count: Int) {
         page = history.checkpoint.page
         renderer.page = page
-        renderer.restore(history.checkpoint.tiles)
+        if let archive = history.checkpoint.archive { do { try renderer.restore(archive) } catch { message = error.localizedDescription; return } } else { renderer.restore(history.checkpoint.tiles) }
         renderer.restoreSelection(history.checkpoint.selection)
         for command in history.commands.prefix(count) { apply(command) }
         reconcileLayerSelection()
@@ -1009,8 +1031,9 @@ final class EditorSession: ObservableObject {
             let keys = store.requiresFullSnapshot(page.id) ? allKeys : renderer.dirtyTileKeys
             let changed = renderer.snapshot(keys: keys)
             let thumbnail = try renderer.projectThumbnailPNG()
+            try renderer.checkStorageIntegrity()
             try store.save(manifest: manifest, page: page, changedTiles: changed,
-                           allTileKeys: allKeys, thumbnail: thumbnail)
+                           allTileKeys: allKeys, thumbnail: thumbnail, tileBounds: renderer.tileContentBounds)
             pageThumbnails[page.id] = UIImage(data: thumbnail)
             renderer.clearSavedDirtyTiles()
             needsSave = false
@@ -1019,6 +1042,14 @@ final class EditorSession: ObservableObject {
             message = L10n.format("保存失败：%@", "\(error.localizedDescription)")
             return false
         }
+    }
+
+    private func switchTo(page newPage: PageRecord, archive: CanvasTileArchive, manifest newManifest: ProjectManifest) throws {
+        endLayerPropertyEdit(commit:false)
+        manifest = newManifest; page = newPage; renderer.page = newPage
+        try renderer.restore(archive); renderer.resetViewport()
+        selectedLayerIDs = newPage.layers.last.map { [$0.id] } ?? []; selectedEditTarget = .content
+        history = CommandHistory(checkpoint:DocumentCheckpoint(page:newPage,archive:archive)); historyRevision += 1
     }
 
     private func switchTo(page newPage: PageRecord, tiles: [TileKey: Data],

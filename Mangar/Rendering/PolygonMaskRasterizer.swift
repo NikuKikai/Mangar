@@ -41,14 +41,13 @@ final class PolygonMaskRasterizer {
     }
 
     func rasterize(_ points: [SIMD2<Float>], canvasSize: CGSize,
-                   tileSize: Int) -> [SelectionTileKey: MTLTexture] {
+                   tileSize: Int, boundary: CanvasBoundary? = nil, origin: SIMD2<Double> = .zero) -> [SelectionTileKey: MTLTexture] {
         guard points.count >= 3 else { return [:] }
-        let minX = CGFloat(points.map(\.x).min()!)
-        let minY = CGFloat(points.map(\.y).min()!)
-        let maxX = CGFloat(points.map(\.x).max()!)
-        let maxY = CGFloat(points.map(\.y).max()!)
-        let bounds = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-            .intersection(CGRect(origin: .zero, size: canvasSize))
+        let minX = CGFloat(points.map(\.x).min()!) + origin.x
+        let minY = CGFloat(points.map(\.y).min()!) + origin.y
+        let maxX = CGFloat(points.map(\.x).max()!) + origin.x
+        let maxY = CGFloat(points.map(\.y).max()!) + origin.y
+        let bounds = (boundary ?? CanvasBoundary(width: Int(canvasSize.width), height: Int(canvasSize.height))).clip(CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY))
         guard !bounds.isNull, bounds.width > 0, bounds.height > 0,
               let command = queue.makeCommandBuffer() else { return [:] }
         var triangles: [SIMD2<Float>] = []
@@ -87,7 +86,7 @@ final class PolygonMaskRasterizer {
                 pass.stencilAttachment.loadAction = .clear
                 pass.stencilAttachment.storeAction = .dontCare
                 guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { continue }
-                var uniforms = SIMD4<Float>(Float(x * tileSize), Float(y * tileSize), Float(tileSize), Float(tileSize))
+                var uniforms = SIMD4<Float>(Float(Double(x * tileSize)-origin.x), Float(Double(y * tileSize)-origin.y), Float(tileSize), Float(tileSize))
                 encoder.setVertexBuffer(vertices, offset: 0, index: 0)
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
                 encoder.setCullMode(.none)
@@ -96,10 +95,11 @@ final class PolygonMaskRasterizer {
                 encoder.setDepthStencilState(toggleStencil)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: triangles.count)
                 // Only cover the real canvas, including partially occupied edge tiles.
-                let left = Float(max(0, x * tileSize))
-                let top = Float(max(0, y * tileSize))
-                let right = min(Float(canvasSize.width), Float((x + 1) * tileSize))
-                let bottom = min(Float(canvasSize.height), Float((y + 1) * tileSize))
+                let clipped = (boundary ?? CanvasBoundary(width: Int(canvasSize.width), height: Int(canvasSize.height))).clip(CGRect(x: x * tileSize, y: y * tileSize, width: tileSize, height: tileSize))
+                let left = Float(clipped.minX-origin.x)
+                let top = Float(clipped.minY-origin.y)
+                let right = Float(clipped.maxX-origin.x)
+                let bottom = Float(clipped.maxY-origin.y)
                 let cover: [SIMD2<Float>] = [SIMD2(left, top), SIMD2(right, top), SIMD2(left, bottom),
                     SIMD2(left, bottom), SIMD2(right, top), SIMD2(right, bottom)]
                 encoder.setVertexBytes(cover, length: cover.count * MemoryLayout<SIMD2<Float>>.stride, index: 0)

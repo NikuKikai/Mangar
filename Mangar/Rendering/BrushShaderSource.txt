@@ -83,12 +83,14 @@ struct QuadUniforms {
     float zoom;
     float rotation;
     float2 pan;
+    float4 bounds;
 };
 
 struct QuadOutput {
     float4 position [[position]];
     float2 uv;
     float2 canvasPosition;
+    float4 bounds [[flat]];
 };
 
 vertex QuadOutput tileVertex(uint vertexID [[vertex_id]],
@@ -106,20 +108,23 @@ vertex QuadOutput tileVertex(uint vertexID [[vertex_id]],
                            scaled.x * s + scaled.y * c) + u.pan;
     float2 clip = float2(screen.x / u.viewport.x * 2.0 - 1.0,
                          1.0 - screen.y / u.viewport.y * 2.0);
-    return { float4(clip, 0, 1), uv, canvasPosition };
+    return { float4(clip, 0, 1), uv, canvasPosition, u.bounds };
 }
 
 fragment float4 tileFragment(QuadOutput in [[stage_in]],
                              texture2d<float> tile [[texture(0)]]) {
+    if (any(in.canvasPosition < in.bounds.xy) || any(in.canvasPosition >= in.bounds.zw)) discard_fragment();
     constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::nearest);
     return tile.sample(s, in.uv);
 }
 
 fragment float4 shapeFragment(QuadOutput in [[stage_in]], constant float4 &color [[buffer(0)]]) {
+    if (any(in.canvasPosition < in.bounds.xy) || any(in.canvasPosition >= in.bounds.zw)) discard_fragment();
     return color;
 }
 
 fragment float4 checkerFragment(QuadOutput in [[stage_in]]) {
+    if (any(in.canvasPosition < in.bounds.xy) || any(in.canvasPosition >= in.bounds.zw)) discard_fragment();
     int2 cell = int2(floor(in.canvasPosition / 16.0));
     float value = ((cell.x + cell.y) & 1) == 0 ? 0.85 : 0.96;
     return float4(value, value, value, 1.0);
@@ -148,19 +153,32 @@ struct SelectionOutlineUniforms {
     float2 canvasSize;
     float zoom;
     float phase;
+    float4 bounds;
+    float2 viewport;
+    uint constantMask;
+    uint padding;
 };
 
-float selectionValue(int2 pixel, int2 local, int direction,
-                     constant SelectionOutlineUniforms &u,
-                     texture2d<float> center, texture2d<float> left,
-                     texture2d<float> right, texture2d<float> top,
-                     texture2d<float> bottom) {
-    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= int(u.canvasSize.x) ||
-        pixel.y >= int(u.canvasSize.y)) return 0.0;
-    if (direction == 1) return left.read(uint2(255, local.y)).r;
-    if (direction == 2) return right.read(uint2(0, local.y)).r;
-    if (direction == 3) return top.read(uint2(local.x, 255)).r;
-    if (direction == 4) return bottom.read(uint2(local.x, 0)).r;
+// Coverage in the owning tile's one-tile halo, including diagonal neighbours.
+float selectionHaloValue(int2 local, constant SelectionOutlineUniforms &u,
+    texture2d<float> center, texture2d<float> left, texture2d<float> right,
+    texture2d<float> top, texture2d<float> bottom,
+    texture2d<float> topLeft, texture2d<float> topRight,
+    texture2d<float> bottomLeft, texture2d<float> bottomRight) {
+    float2 pixel = u.tileOrigin + float2(local);
+    if (any(pixel < u.bounds.xy) || any(pixel >= u.bounds.zw)) return 0.0;
+    if (local.y < 0) {
+        if (local.x < 0) return topLeft.read(uint2(local+256)).r;
+        if (local.x >= 256) return topRight.read(uint2(local+int2(-256,256))).r;
+        return top.read(uint2(local+int2(0,256))).r;
+    }
+    if (local.y >= 256) {
+        if (local.x < 0) return bottomLeft.read(uint2(local+int2(256,-256))).r;
+        if (local.x >= 256) return bottomRight.read(uint2(local-256)).r;
+        return bottom.read(uint2(local-int2(0,256))).r;
+    }
+    if (local.x < 0) return left.read(uint2(local+int2(256,0))).r;
+    if (local.x >= 256) return right.read(uint2(local-int2(256,0))).r;
     return center.read(uint2(local)).r;
 }
 
@@ -174,58 +192,58 @@ fragment float4 selectionOutlineFragment(QuadOutput in [[stage_in]],
     texture2d<float> center [[texture(0)]], texture2d<float> left [[texture(1)]],
     texture2d<float> right [[texture(2)]], texture2d<float> top [[texture(3)]],
     texture2d<float> bottom [[texture(4)]],
+    texture2d<float> topLeft [[texture(5)]], texture2d<float> topRight [[texture(6)]],
+    texture2d<float> bottomLeft [[texture(7)]], texture2d<float> bottomRight [[texture(8)]],
     constant SelectionOutlineUniforms &u [[buffer(0)]]) {
-    int2 pixel = int2(floor(in.canvasPosition));
-    int2 local = pixel - int2(u.tileOrigin);
-    // A canvas edge must be visible even when its boundary pixel is smaller
-    // than one screen pixel. Sample the inside edge, then draw around its true
-    // geometric location; the quad includes a small exterior gutter.
     float2 p = in.canvasPosition;
-    float padding = 0.75 / max(u.zoom, 0.000001);
-    int2 limit = int2(u.canvasSize) - 1;
-    if (p.x >= -padding && p.y >= -padding && p.x <= u.canvasSize.x + padding && p.y <= u.canvasSize.y + padding) {
-        int2 edgePixel = clamp(pixel, int2(0), limit);
-        if (min(abs(p.x), abs(p.x - u.canvasSize.x)) <= padding ||
-            min(abs(p.y), abs(p.y - u.canvasSize.y)) <= padding) {
-            if (abs(p.x) <= padding) edgePixel.x = 0;
-            else if (abs(p.x - u.canvasSize.x) <= padding) edgePixel.x = limit.x;
-            if (abs(p.y) <= padding) edgePixel.y = 0;
-            else if (abs(p.y - u.canvasSize.y) <= padding) edgePixel.y = limit.y;
-            int2 edgeLocal = edgePixel - int2(u.tileOrigin);
-            if (all(edgeLocal >= 0) && all(edgeLocal < 256) && center.read(uint2(edgeLocal)).r > 0.5)
-                return marchingAntColor(in.position.xy, u.phase);
+    float padding = 0.75 / max(u.zoom, 1e-12);
+    if (u.constantMask != 0) {
+        float coverage = u.constantMask >= 2 ? center.read(uint2(clamp(in.position.xy,float2(0),u.viewport-1))).r : 1.0;
+        bool canvasEdge = (min(abs(p.x-u.bounds.x),abs(p.x-u.bounds.z)) <= padding || min(abs(p.y-u.bounds.y),abs(p.y-u.bounds.w)) <= padding) && all(p >= u.bounds.xy-padding) && all(p <= u.bounds.zw+padding);
+        bool viewportEdge = all(p >= u.bounds.xy) && all(p < u.bounds.zw) && (in.position.x < 1.0 || in.position.y < 1.0 || in.position.x >= u.viewport.x-1.0 || in.position.y >= u.viewport.y-1.0);
+        if (coverage > 0.5 && (canvasEdge || viewportEdge)) return marchingAntColor(in.position.xy,u.phase);
+        // At extreme minification use the bounded viewport representation.
+        if (u.constantMask == 3) {
+            int2 q = int2(in.position.xy), limit = int2(u.viewport)-1;
+            bool inside = coverage > 0.5;
+            for (int y=-1;y<=1;y++) for (int x=-1;x<=1;x++) {
+                bool neighbour = center.read(uint2(clamp(q+int2(x,y),int2(0),limit))).r > 0.5;
+                if (inside != neighbour) return marchingAntColor(in.position.xy,u.phase);
+            }
         }
+        discard_fragment();
     }
-    if (local.x < 0 || local.y < 0 || local.x >= 256 || local.y >= 256) discard_fragment();
-    bool inside = selectionValue(pixel, local, 0, u, center, left, right, top, bottom) > 0.5;
-    float2 fraction = in.canvasPosition - float2(pixel);
-    float distancePixels = 1e10;
-    int leftDirection = local.x == 0 ? 1 : 0;
-    int rightDirection = local.x == 255 ? 2 : 0;
-    int topDirection = local.y == 0 ? 3 : 0;
-    int bottomDirection = local.y == 255 ? 4 : 0;
-    if (inside != (selectionValue(pixel + int2(-1, 0), local + int2(-1, 0),
-                                  leftDirection, u, center, left, right, top, bottom) > 0.5))
-        distancePixels = min(distancePixels, fraction.x * u.zoom);
-    if (inside != (selectionValue(pixel + int2(1, 0), local + int2(1, 0),
-                                  rightDirection, u, center, left, right, top, bottom) > 0.5))
-        distancePixels = min(distancePixels, (1.0 - fraction.x) * u.zoom);
-    if (inside != (selectionValue(pixel + int2(0, -1), local + int2(0, -1),
-                                  topDirection, u, center, left, right, top, bottom) > 0.5))
-        distancePixels = min(distancePixels, fraction.y * u.zoom);
-    if (inside != (selectionValue(pixel + int2(0, 1), local + int2(0, 1),
-                                  bottomDirection, u, center, left, right, top, bottom) > 0.5))
-        distancePixels = min(distancePixels, (1.0 - fraction.y) * u.zoom);
-    if (distancePixels > 0.75) discard_fragment();
-    return marchingAntColor(in.position.xy, u.phase);
+    // A fragment covers a screen pixel square, not a single canvas pixel.
+    // Project that footprint to canvas axes, so rotation and minification do
+    // not leave gaps when its centre lies several canvas pixels from an edge.
+    float2 footprint = 0.5*(abs(dfdx(p))+abs(dfdy(p))) + 0.125/max(u.zoom,1e-12);
+    int2 radius = min(int2(ceil(footprint))+1,int2(24));
+    int2 base = int2(floor(p-u.tileOrigin));
+    for (int y=-radius.y;y<=radius.y;y++) for (int x=-radius.x;x<=radius.x;x++) {
+        int2 local = base+int2(x,y);
+        float2 cell = u.tileOrigin+float2(local);
+        if (any(cell+1.0 < p-footprint) || any(cell > p+footprint)) continue;
+        bool inside = selectionHaloValue(local,u,center,left,right,top,bottom,topLeft,topRight,bottomLeft,bottomRight) > 0.5;
+        if (abs(cell.x+1.0-p.x) <= footprint.x && cell.y <= p.y+footprint.y && cell.y+1.0 >= p.y-footprint.y &&
+            inside != (selectionHaloValue(local+int2(1,0),u,center,left,right,top,bottom,topLeft,topRight,bottomLeft,bottomRight) > 0.5))
+            return marchingAntColor(in.position.xy,u.phase);
+        if (abs(cell.y+1.0-p.y) <= footprint.y && cell.x <= p.x+footprint.x && cell.x+1.0 >= p.x-footprint.x &&
+            inside != (selectionHaloValue(local+int2(0,1),u,center,left,right,top,bottom,topLeft,topRight,bottomLeft,bottomRight) > 0.5))
+            return marchingAntColor(in.position.xy,u.phase);
+    }
+    discard_fragment();
 }
 
 // Raw R8 coverage, with no threshold. This display never enters exported pixels.
 fragment float4 selectionTintFragment(QuadOutput in [[stage_in]], texture2d<float, access::read> tile [[texture(0)]],
                                      constant SelectionOutlineUniforms &u [[buffer(0)]]) {
-    int2 pixel = int2(floor(in.canvasPosition));
-    int2 local = pixel - int2(u.tileOrigin);
-    if (any(pixel < 0) || any(float2(pixel) >= u.canvasSize) || any(local < 0) || any(local >= 256)) discard_fragment();
+    if (any(in.canvasPosition < u.bounds.xy) || any(in.canvasPosition >= u.bounds.zw)) discard_fragment();
+    if (u.constantMask != 0) {
+        float alpha = u.constantMask >= 2 ? tile.read(uint2(in.position.xy)).r : 1.0;
+        return float4(float3(0.10,0.45,1.0)*alpha,alpha);
+    }
+    int2 local = int2(floor(in.canvasPosition-u.tileOrigin));
+    if (any(local < 0) || any(local >= 256)) discard_fragment();
     float alpha = tile.read(uint2(local)).r;
     return float4(float3(0.10, 0.45, 1.0) * alpha, alpha);
 }
@@ -255,7 +273,9 @@ struct LayerCompositeUniforms {
     uint padding;
     float4 tone; // period in canvas pixels, angle in radians, density, enabled
     float4 canvasMap; // cos(rotation)/zoom, sin(rotation)/zoom, view pan x/y
-    float4 solidColor; // Premultiplied graphic fill; mask visualization uses white.
+    float4 solidColor;
+    float2 tonePhase;
+    float2 reserved; // Premultiplied graphic fill; mask visualization uses white.
 };
 struct LayerCompositeOutput {
     float4 color [[color(0), raster_order_group(0)]];
@@ -305,7 +325,7 @@ float4 applyLayerTone(float4 source, float2 screen, constant LayerCompositeUnifo
     float2 canvas = float2(delta.x * u.canvasMap.x + delta.y * u.canvasMap.y,
                           -delta.x * u.canvasMap.y + delta.y * u.canvasMap.x);
     float c = cos(u.tone.y), s = sin(u.tone.y);
-    float2 grid = float2(canvas.x * c + canvas.y * s, -canvas.x * s + canvas.y * c) / u.tone.x;
+    float2 grid = float2(canvas.x * c + canvas.y * s, -canvas.x * s + canvas.y * c) / u.tone.x + u.tonePhase;
     float distance = length(fract(grid) - 0.5);
     // Uniform scale gives an analytic one-screen-pixel footprint. Unlike quad
     // derivatives, this stays identical when panning by an odd pixel offset.
@@ -331,6 +351,7 @@ fragment LayerCompositeOutput layerCompositeFragment(
     texture2d<float> curves [[texture(3)]],
     constant LayerCompositeUniforms &u [[buffer(0)]],
     float4 destination [[color(0), raster_order_group(0)]]) {
+    if (any(in.canvasPosition < in.bounds.xy) || any(in.canvasPosition >= in.bounds.zw)) discard_fragment();
     constexpr sampler samplerNearest(coord::normalized, address::clamp_to_edge, filter::nearest);
     float4 source = u.solid != 0 ? u.solidColor : tile.sample(samplerNearest, in.uv);
     source = applyLayerCurve(source, curves, u.padding);
@@ -347,6 +368,7 @@ fragment float4 layerCompositeFallbackFragment(
     texture2d<float, access::read> layerMask [[texture(2)]],
     texture2d<float> curves [[texture(3)]],
     constant LayerCompositeUniforms &u [[buffer(0)]]) {
+    if (any(in.canvasPosition < in.bounds.xy) || any(in.canvasPosition >= in.bounds.zw)) discard_fragment();
     constexpr sampler samplerNearest(coord::normalized, address::clamp_to_edge, filter::nearest);
     float4 source = u.solid != 0 ? u.solidColor : tile.sample(samplerNearest, in.uv);
     source = applyLayerCurve(source, curves, u.padding);
@@ -426,6 +448,7 @@ kernel void fillLassoLayerMask(texture2d<float, access::read> base [[texture(0)]
 
 
 fragment float maskValueFragment(QuadOutput in [[stage_in]], texture2d<float> tile [[texture(0)]]) {
+    if (any(in.canvasPosition < in.bounds.xy) || any(in.canvasPosition >= in.bounds.zw)) discard_fragment();
     constexpr sampler nearest(coord::normalized, address::clamp_to_edge, filter::nearest);
     return tile.sample(nearest, in.uv).r;
 }
@@ -449,4 +472,14 @@ kernel void clearLayer(texture2d<float, access::read> source [[texture(0)]],
     atomic_fetch_min_explicit(&bounds[1], gid.y, memory_order_relaxed);
     atomic_fetch_max_explicit(&bounds[2], gid.x + 1, memory_order_relaxed);
     atomic_fetch_max_explicit(&bounds[3], gid.y + 1, memory_order_relaxed);
+}
+
+kernel void downsampleCanvasTile(texture2d<float,access::read> a [[texture(0)]], texture2d<float,access::read> b [[texture(1)]], texture2d<float,access::read> c [[texture(2)]], texture2d<float,access::read> d [[texture(3)]], texture2d<float,access::write> out [[texture(4)]], uint2 p [[thread_position_in_grid]]) {
+    uint2 q=(p%128)*2; uint child=(p.x/128)+(p.y/128)*2;
+    float4 sum=0;
+    for(uint y=0;y<2;y++) for(uint x=0;x<2;x++) {
+        uint2 t=q+uint2(x,y);
+        sum += child==0 ? a.read(t) : child==1 ? b.read(t) : child==2 ? c.read(t) : d.read(t);
+    }
+    out.write(sum*0.25,p);
 }

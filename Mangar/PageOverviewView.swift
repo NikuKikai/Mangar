@@ -16,6 +16,15 @@ struct PageOverviewView: View {
         let _ = interfaceLanguage
         ScrollView {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
+                if session.manifest.pageStructure == .cards {
+                    ForEach(Array(session.manifest.pageIDs.enumerated()), id: \.element) { index, id in
+                        pageThumbnail(id, number: index+1, spread: false)
+                            .background(GeometryReader { geometry in
+                                Color.clear.preference(key: PageFramesKey.self, value: [index: geometry.frame(in: .named("pages"))])
+                            })
+                    }
+                    addPageControl(at: session.manifest.pageIDs.count, spread: false, dashed: true)
+                } else {
                 ForEach(PageContainer.arrange(session.manifest)) { container in
                     containerView(container)
                         .environment(\.layoutDirection, .leftToRight)
@@ -24,8 +33,9 @@ struct PageOverviewView: View {
                                 value: [container.id: geometry.frame(in: .named("pages"))])
                         })
                 }
+                }
             }
-            .environment(\.layoutDirection, .rightToLeft)
+            .environment(\.layoutDirection, session.manifest.pageStructure == .cards ? .leftToRight : .rightToLeft)
             .padding(24)
             .overlay {
                 ZStack(alignment: .topLeading) {
@@ -192,6 +202,7 @@ struct PageOverviewView: View {
         ZStack {
             Color.black.opacity(0.12).contentShape(Rectangle()).onTapGesture { menuPage = nil }
             VStack(spacing: 0) {
+                if session.manifest.pageStructure == .bookSpreads {
                 if session.manifest.spreadPageIDs.contains(id) {
                     menuButton(L10n.text("拆分为两个单页"), icon: "rectangle.split.2x1") {
                         menuPage = nil
@@ -206,6 +217,7 @@ struct PageOverviewView: View {
                     .opacity(session.mergePartner(for: id) == nil ? 0.4 : 1)
                 }
                 Divider()
+                }
                 menuButton(L10n.text("删除"), icon: "trash", destructive: true) {
                     menuPage = nil
                     pendingDelete = id
@@ -232,6 +244,12 @@ struct PageOverviewView: View {
     }
 
     private func dropTarget(at point: CGPoint, spread: Bool) -> PageDropTarget? {
+        if session.manifest.pageStructure == .cards {
+            guard let item = frames.min(by: { distance(point, $0.value) < distance(point, $1.value) }) else { return nil }
+            let before = point.x < item.value.midX
+            return PageDropTarget(index: item.key + (before ? 0 : 1),
+                frame: CGRect(x: before ? item.value.minX : item.value.maxX, y: item.value.minY, width: 3, height: item.value.height))
+        }
         let containers = PageContainer.arrange(session.manifest)
         guard let container = containers.min(by: {
             distance(point, frames[$0.id] ?? .zero) < distance(point, frames[$1.id] ?? .zero)

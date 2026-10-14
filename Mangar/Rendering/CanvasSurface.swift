@@ -187,14 +187,6 @@ final class CanvasSurface: MTKView {
             beginFingerTransform()
             return
         }
-        if let selectionTouch, selectionTouch.type == .direct,
-           let secondFinger = touches.first(where: { $0.type == .direct }) {
-            session.cancelSelection()
-            fingerTouches = [selectionTouch, secondFinger]
-            self.selectionTouch = nil
-            beginFingerTransform()
-            return
-        }
         if selectionTouch == nil, pickingTouch == nil,
            session.selectedTool.isRegionTool,
            let pencil = touches.first(where: { $0.type == .pencil }) {
@@ -212,13 +204,6 @@ final class CanvasSurface: MTKView {
             session.pickColor(at: point)
             return
         }
-        if let pickingTouch, pickingTouch.type == .direct,
-           let secondFinger = touches.first(where: { $0.type == .direct }) {
-            fingerTouches = [pickingTouch, secondFinger]
-            self.pickingTouch = nil
-            beginFingerTransform()
-            return
-        }
         guard pickingTouch == nil, selectionTouch == nil else { return }
         if pencilTouch == nil, let pencil = touches.first(where: { $0.type == .pencil }) {
             pencilTouch = pencil
@@ -232,20 +217,6 @@ final class CanvasSurface: MTKView {
             return
         }
         guard pencilTouch == nil else { return }
-        if session.selectedTool.isSelectionTool, fingerTouches.isEmpty,
-           let finger = touches.first(where: { $0.type == .direct }) {
-            selectionTouch = finger
-            session.beginSelection(at: session.renderer.canvasPoint(from: finger.preciseLocation(in: self)),
-                                   shift: shiftDown, option: optionDown)
-            return
-        }
-        if optionDown, fingerTouches.isEmpty,
-           let finger = touches.first(where: { $0.type == .direct }) {
-            pickingTouch = finger
-            let point = session.renderer.canvasPoint(from: finger.preciseLocation(in: self))
-            session.pickColor(at: point)
-            return
-        }
         for finger in touches where finger.type == .direct {
             fingerTouches.append(finger)
         }
@@ -429,7 +400,7 @@ final class CanvasSurface: MTKView {
             let center = midpoint(first, second)
             let distance = hypot(second.x - first.x, second.y - first.y)
             let angle = atan2(second.y - first.y, second.x - first.x)
-            renderer.zoom = min(8, max(0.05, start.zoom * distance / start.distance))
+            renderer.zoom = min(8, max(renderer.minimumViewportZoom, start.zoom * distance / start.distance))
             renderer.rotation = start.rotation + angle - start.angle
             let mapped = renderer.rotatedScaledPoint(start.canvasAnchor)
             renderer.pan = CGPoint(x: center.x - mapped.x, y: center.y - mapped.y)

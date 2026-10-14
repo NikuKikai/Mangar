@@ -17,7 +17,14 @@ struct BrushUniforms {
     float4 wet; // pickup, mixing, paint load, carry distance
     float4 medium; // mode, dilution, granulation, edge darkening
     int4 pickupTiles; // window tile origin and dimensions
+    float4 clip; // optional world bounds, relative to current GPU origin
 };
+
+kernel void brushRebase(device BrushState &state [[buffer(0)]], constant float2 &delta [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    if (gid != 0) return;
+    state.last.point.xy += delta;
+    state.wetState.yz += delta;
+}
 
 uint brushHash(uint value) {
     value ^= value >> 16; value *= 0x7feb352du;
@@ -71,12 +78,13 @@ float4 brushPickup(BrushInput p, float radius, float aspect, float angle, uint i
         offset *= min(1.0, 128.0 / max(length(offset), 0.00001));
         float2 position = p.point.xy + float2(offset.x*c - offset.y*s, offset.x*s + offset.y*c);
         weightSum += weight;
-        if (any(position < 0.0) || position.x >= u.tile.z || position.y >= u.tile.w) continue;
+        if (any(position < u.clip.xy) || any(position >= u.clip.zw)) continue;
         int2 pixel = int2(floor(position));
-        int2 tile = pixel / 256 - u.pickupTiles.xy;
+        int2 tileCoordinate = int2(floor(position / 256.0));
+        int2 tile = tileCoordinate - u.pickupTiles.xy;
         if (any(tile < 0) || tile.x >= u.pickupTiles.z || tile.y >= u.pickupTiles.w) continue;
         uint slice = uint(tile.y * u.pickupTiles.z + tile.x);
-        uint2 local = uint2(pixel % 256);
+        uint2 local = uint2(pixel - tileCoordinate * 256);
         total += source.read(local, slice) * selection.read(local, slice).r * weight;
     }
     return total.a > 0.00001 ? float4(total.rgb / total.a, total.a / max(weightSum, 0.00001)) : float4(0.0);
@@ -239,7 +247,7 @@ kernel void brushRaster(texture2d<float, access::read> base [[texture(0)]],
     float coverage = previousCoverage.read(gid).r;
     float3 paintRGB = u.medium.x == 0.0 ? u.color.rgb : previousPaint.read(gid).rgb;
     uint block = gid.x / 16 + (gid.y / 16) * 16;
-    if (p.x < u.tile.z && p.y < u.tile.w) {
+    if (all(p >= u.clip.xy) && all(p < u.clip.zw)) {
         for (uint j = 0; j < counts[block]; ++j) {
             BrushDab d = dabs[indices[block * u.modes.w + j]];
             float2 v = p - d.geometry.xy;
@@ -258,14 +266,14 @@ kernel void brushRaster(texture2d<float, access::read> base [[texture(0)]],
             }
             if (d.shape.z > 0.0) {
                 // Canvas-fixed grain does not crawl with sampling cadence or dab jitter.
-                uint h = brushHash(uint(p.x) ^ brushHash(uint(p.y) + 0x51e2a79du));
+                uint h = brushHash((u.images.z + gid.x) ^ brushHash(u.images.w + gid.y + 0x51e2a79du));
                 float paper = float(h & 0xffffu) / 65535.0;
                 edge *= mix(1.0, smoothstep(0.12, 0.9, paper), d.shape.z);
             }
             if (u.medium.x == 2.0) {
                 float border = smoothstep(0.45, 0.85, radial / max(r, 0.00001));
                 edge *= 1.0 - u.medium.w * (1.0 - border);
-                uint h = brushHash(uint(p.x) ^ brushHash(uint(p.y) + 0x7891abdu));
+                uint h = brushHash((u.images.z + gid.x) ^ brushHash(u.images.w + gid.y + 0x7891abdu));
                 float paper = float(h & 0xffffu) / 65535.0;
                 edge *= mix(1.0, 0.35 + 0.65 * paper, u.medium.z);
             }

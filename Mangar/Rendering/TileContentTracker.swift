@@ -21,7 +21,7 @@ final class TileContentTracker {
         self.device = device; self.queue = queue
         pipeline = try device.makeComputePipelineState(function: library.makeFunction(name: "tileContentBounds")!)
     }
-    func record(_ textures: [TileKey: MTLTexture], width: Int, height: Int) {
+    func record(_ textures: [TileKey: MTLTexture], width: Int, height: Int, boundary: CanvasBoundary? = nil) {
         guard !textures.isEmpty, let command = queue.makeCommandBuffer() else { return }
         command.label = "Measure actual tile content"
         for (key, texture) in textures {
@@ -29,8 +29,7 @@ final class TileContentTracker {
             guard let buffer = device.makeBuffer(bytes: initial, length: 16),
                   let encoder = command.makeComputeCommandEncoder() else { continue }
             var isMask: UInt32 = key.target == .mask ? 1 : 0
-            var valid = SIMD2<UInt32>(UInt32(max(0, min(256, width - key.x * 256))),
-                                      UInt32(max(0, min(256, height - key.y * 256))))
+            var valid = SIMD2<UInt32>(256, 256)
             encoder.setComputePipelineState(pipeline)
             encoder.setTexture(texture, index: 0)
             encoder.setBytes(&isMask, length: 4, index: 0)

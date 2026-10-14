@@ -8,12 +8,19 @@ struct ProjectManagerView: View {
     let currentProject: ProjectSummary?
     let close: (() -> Void)?
     let open: (URL) -> Void
-    let create: (String, ComicPageLayout, Int, PageStartSide) -> Void
+    let create: (ProjectCreation) -> Void
     let importProject: (URL) -> Void
     let delete: (URL) -> Void
     let applicationSettings: () -> Void
 
     @State private var showingAppMenu = false
+    @State private var purpose: ProjectPurpose = .book
+    @State private var unlimitedWidth = false
+    @State private var unlimitedHeight = true
+    @State private var startsAtZeroX = true
+    @State private var startsAtZeroY = false
+    @State private var pixelWidth = "2048"
+    @State private var pixelHeight = "2048"
     @State private var creating = false
     @State private var name = L10n.text("未命名项目")
     @State private var width = "182"
@@ -241,9 +248,16 @@ struct ProjectManagerView: View {
                                 .foregroundStyle(Color.accentColor)
                         }
                     }
-                    Text(L10n.format("%@ 页  ·  %@", "\(project.pageCount)", "\(L10n.date(project.modifiedAt))"))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                    HStack(spacing:6) {
+                        Text(L10n.format("%@ 页  ·  %@", "\(project.pageCount)", "\(L10n.date(project.modifiedAt))"))
+                            .font(.system(size:11)).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer(minLength:0)
+                        Text(project.purpose.title)
+                            .font(.system(size:10,weight:.medium)).foregroundStyle(.secondary)
+                            .padding(.horizontal,4).padding(.vertical,2)
+                            .background(Color.white.opacity(0.07))
+                            .fixedSize()
+                    }
                 }
                 .padding(9)
             }
@@ -280,9 +294,21 @@ struct ProjectManagerView: View {
 
     private var creationForm: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 12) {
                 Text(L10n.text("新建项目"))
-                    .font(.system(size: 21, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
+                HStack(spacing: 0) {
+                    ForEach(ProjectPurpose.allCases, id: \.self) { type in
+                        Button { purpose = type; showingPresets = false } label: {
+                            Text(type.title).font(.system(size: 12)).frame(width: 100, height: 28)
+                                .background(purpose == type ? Color.accentColor.opacity(0.3) : Color.white.opacity(0.06))
+                        }
+                        .buttonStyle(ImmediateButtonStyle())
+                        .accessibilityAddTraits(purpose == type ? [.isSelected] : [])
+                        if type != ProjectPurpose.allCases.last { Rectangle().fill(.white.opacity(0.16)).frame(width: 1, height: 28) }
+                    }
+                }.overlay(Rectangle().stroke(.white.opacity(0.2),lineWidth:1))
+                if purpose == .book {
                 VStack(alignment: .leading, spacing: 0) {
                     Button {
                         showingPresets.toggle()
@@ -311,7 +337,7 @@ struct ProjectManagerView: View {
                                     height = String(preset.height)
                                     showingPresets = false
                                 } label: {
-                                    Text("\(preset.name)  ·  \(preset.width) × \(preset.height) mm")
+                                    Text(verbatim: "\(preset.name)  ·  \(preset.width) × \(preset.height) mm")
                                         .frame(maxWidth: .infinity, minHeight: 29, alignment: .leading)
                                         .padding(.horizontal, 8)
                                         .contentShape(Rectangle())
@@ -361,25 +387,78 @@ struct ProjectManagerView: View {
                      ?? L10n.text("请输入有效尺寸；画布最长边不超过 16384 px"))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
+                } else {
+                    field(L10n.text("项目名称"), value: $name)
+                    unrestrictedAxis(L10n.text("canvas.axis.x"), value: $pixelWidth, unlimited: $unlimitedWidth, startsAtZero: $startsAtZeroX)
+                    unrestrictedAxis(L10n.text("canvas.axis.y"), value: $pixelHeight, unlimited: $unlimitedHeight, startsAtZero: $startsAtZeroY)
+                    field(L10n.text("初始页数"), value: $pageCount, numeric: true)
+                }
                 HStack {
                     Button(L10n.text("取消")) { creating = false }
                     Spacer()
                     Button(L10n.text("创建并打开")) {
-                        guard let layout = draftLayout, let count = Int(pageCount) else { return }
-                        create(name.trimmingCharacters(in: .whitespacesAndNewlines), layout, count, startingSide)
+                        guard let request = creationRequest else { return }
+                        create(request)
                     }
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                              draftLayout == nil ||
-                              Int(pageCount).map { !(1...100).contains($0) } ?? true)
+                    .disabled(creationRequest == nil)
                     .buttonStyle(ImmediateBorderedButtonStyle(prominent: true))
                 }
                 .padding(.top, 4)
             }
             .frame(maxWidth: 580, alignment: .leading)
-            .padding(30)
+            .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .buttonStyle(ImmediateBorderedButtonStyle())
+    }
+
+    private var creationRequest: ProjectCreation? {
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, let count = Int(pageCount), (1...100).contains(count) else { return nil }
+        if purpose == .book {
+            guard let layout = draftLayout else { return nil }
+            return ProjectCreation(name: title, purpose: purpose,
+                boundary: CanvasBoundary(width: layout.canvasWidthPixels, height: layout.canvasHeightPixels),
+                layout: layout, pageCount: count, startingSide: startingSide)
+        }
+        let w = Int(pixelWidth), h = Int(pixelHeight)
+        guard unlimitedWidth || (w.map { (-1_000_000_000...1_000_000_000).contains($0) && (!startsAtZeroX || $0 > 0) } ?? false),
+              unlimitedHeight || (h.map { (-1_000_000_000...1_000_000_000).contains($0) && (!startsAtZeroY || $0 > 0) } ?? false) else { return nil }
+        return ProjectCreation(name: title, purpose: purpose,
+            boundary: CanvasBoundary(width: unlimitedWidth ? nil : w, height: unlimitedHeight ? nil : h, startsAtZeroX: startsAtZeroX, startsAtZeroY: startsAtZeroY),
+            layout: nil, pageCount: count, startingSide: .right)
+    }
+    private func rangeChoice(_ left: String, _ right: String, rightSelected: Binding<Bool>) -> some View {
+        HStack(spacing:0) {
+            ForEach(0..<2) { index in
+                Button { rightSelected.wrappedValue = index == 1 } label: {
+                    Text(index == 0 ? left : right).font(.system(size:12))
+                        .frame(width:72,height:26)
+                        .background((rightSelected.wrappedValue == (index == 1)) ? Color.accentColor.opacity(0.3) : Color.white.opacity(0.05))
+                }.buttonStyle(ImmediateButtonStyle())
+                .accessibilityAddTraits(rightSelected.wrappedValue == (index == 1) ? [.isSelected] : [])
+                if index == 0 { Rectangle().fill(.white.opacity(0.16)).frame(width:1,height:26) }
+            }
+        }.overlay(Rectangle().stroke(.white.opacity(0.2),lineWidth:1))
+    }
+
+    private func unrestrictedAxis(_ title: String, value: Binding<String>, unlimited: Binding<Bool>, startsAtZero: Binding<Bool>) -> some View {
+        VStack(alignment:.leading,spacing:6) {
+            Text(title).font(.system(size:12,weight:.medium)).foregroundStyle(.secondary)
+            HStack(spacing:8) {
+                Text(L10n.text("canvas.start")).font(.system(size:12)).frame(width:40,alignment:.leading)
+                rangeChoice("−∞", "0", rightSelected:startsAtZero)
+            }
+            HStack(spacing:8) {
+                Text(L10n.text("canvas.end")).font(.system(size:12)).frame(width:40,alignment:.leading)
+                rangeChoice(L10n.text("canvas.fixed"), "+∞", rightSelected:unlimited)
+                TextField("px",text:value).keyboardType(.numbersAndPunctuation).textFieldStyle(.plain)
+                    .font(.system(size:12)).padding(.horizontal,6).frame(width:100,height:26)
+                    .background(Color.white.opacity(0.06)).disabled(unlimited.wrappedValue)
+                    .opacity(unlimited.wrappedValue ? 0.4 : 1)
+                Text(verbatim:"px").font(.system(size:11)).foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func field(_ title: String, value: Binding<String>, numeric: Bool = false,

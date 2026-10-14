@@ -64,6 +64,10 @@ enum PageConversion {
             var layer = original
             layer.id = ids[original.id]!
             layer.parentID = original.parentID.flatMap { ids[$0] } ?? group?.id
+            if original.kind == .solidColor {
+                let cropped = (original.solidBounds ?? clip).intersection(clip)
+                layer.solidBounds = cropped.isNull ? .zero : cropped.offsetBy(dx: CGFloat(offset), dy: 0)
+            }
             if var shape = original.shape, original.kind == .shape {
                 let cropped = shape.bounds.intersection(clip)
                 shape.bounds = cropped.isNull ? .zero : cropped.offsetBy(dx: CGFloat(offset), dy: 0)

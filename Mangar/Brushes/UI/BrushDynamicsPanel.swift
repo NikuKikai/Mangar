@@ -82,9 +82,11 @@ struct BrushDynamicsPanel: View {
     }
 }
 
-private struct BrushResponseCurveGraph: View {
+struct BrushResponseCurveGraph: View {
     @Binding var curve: BrushResponseCurve
     let limit: Double
+    var begin: () -> Void = {}
+    var end: () -> Void = {}
     @State private var draggingPoint: Int?
     var body: some View {
         GeometryReader { geometry in
@@ -95,7 +97,7 @@ private struct BrushResponseCurveGraph: View {
             .background(Color.black.opacity(0.25)).contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { value in updateDrag(value, size: geometry.size) }
-                .onEnded { _ in draggingPoint = nil })
+                .onEnded { _ in draggingPoint = nil; end() })
             .accessibilityLabel("动态曲线，拖动控制点调整倍数")
         }
     }
@@ -109,6 +111,7 @@ private struct BrushResponseCurveGraph: View {
     private func updateDrag(_ value: DragGesture.Value, size: CGSize) {
         let fraction = value.startLocation.x / max(1, size.width)
         let index = draggingPoint ?? min(4, max(0, Int((fraction * 4).rounded())))
+        if draggingPoint == nil { begin() }
         draggingPoint = index
         curve.outputs[index] = min(limit, max(0, Double(1 - value.location.y / max(1, size.height)) * limit))
     }

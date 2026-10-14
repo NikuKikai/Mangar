@@ -28,6 +28,11 @@ final class EditorSession: ObservableObject {
     }
     @Published private(set) var colorPresets = AppToolPreferences.loadColorPresets()
     @Published var showsTargetTint = false
+    @Published var showsSelectionTint = false
+    @Published private(set) var isFilling = false
+    @Published var bucketSettings = BucketSettings.load() {
+        didSet { bucketSettings.save() }
+    }
     @Published var selectedTool: DrawingTool = .brush
     @Published var activeModifiers: Set<EditorModifier> = []
     @Published var message: String?
@@ -201,6 +206,8 @@ final class EditorSession: ObservableObject {
 
     func beginStroke(at point: CGPoint, pressure: CGFloat, timestamp: TimeInterval,
                      altitude: CGFloat, azimuth: CGFloat) {
+        guard !isFilling else { return }
+        if selectedTool == .bucket { fillBucket(at: point); return }
         guard !selectedTool.isRegionTool else { return }
         guard let selectedLayerID, renderer.isInsideCanvas(point),
               page.layers.contains(where: { $0.id == selectedLayerID &&
@@ -446,6 +453,52 @@ final class EditorSession: ObservableObject {
             result.red = gray; result.green = gray; result.blue = gray
         }
         return result
+    }
+
+    var hasSelection: Bool { renderer.selection != nil }
+
+    func fillBucket(at point: CGPoint) {
+        guard !isFilling, renderer.isInsideCanvas(point), let layer = selectedLayer,
+              (selectedEditTarget == .mask ? layer.hasMask : layer.kind == .paint),
+              page.isEffectivelyVisible(layer.id), !page.isEffectivelyLocked(layer.id) else { return }
+        endStroke(); endLayerPropertyEdit(); cancelSelection()
+        let target = selectedEditTarget
+        let source = renderer.snapshot(keys: Set(renderer.tileKeys.filter { $0.layerID == layer.id && $0.target == target }))
+        let reference = Dictionary(uniqueKeysWithValues: source.map { (SelectionTileKey(x: $0.key.x, y: $0.key.y), $0.value) })
+        let selection = renderer.selectionReadback()
+        let settings = bucketSettings.validated, width = page.width, height = page.height
+        let pageID = page.id, revision = historyRevision, color = editingBrush, erases = usesTransparentColor
+        isFilling = true
+        Task {
+            let spans = await Task.detached(priority: .userInitiated) {
+                BucketRegionResolver.resolve(width: width, height: height, x: Int(point.x), y: Int(point.y), target: target,
+                    source: reference, settings: settings, selection: selection.tiles, selectionDefault: selection.defaultCoverage)
+            }.value
+            isFilling = false
+            // Any intervening document/selection change invalidates the captured operation.
+            guard page.id == pageID, historyRevision == revision, selectedLayerID == layer.id,
+                  selectedEditTarget == target, page.isEffectivelyVisible(layer.id), !page.isEffectivelyLocked(layer.id), !spans.isEmpty else { return }
+            perform(.bucketFill(BucketFillCommand(layerID: layer.id, spans: spans, brush: color, target: target, erases: erases)))
+        }
+    }
+
+    var selectedCurvesWillEnable: Bool { !selectedLayers.allSatisfy { $0.curves?.isEnabled == true } }
+    func toggleSelectedCurves() {
+        guard !selectedLayerIDs.isEmpty else { return }
+        endLayerPropertyEdit()
+        let enabled = selectedCurvesWillEnable, ids = Set(selectedLayerIDs)
+        var updated = page.layers
+        for i in updated.indices where ids.contains(updated[i].id) {
+            var effect = updated[i].curves ?? LayerCurveEffect()
+            effect.isEnabled = enabled; updated[i].curves = effect
+        }
+        perform(.replaceLayerStack(updated))
+    }
+    func previewLayerCurve(channel: LayerCurveEffect.Channel, values: [Double]) {
+        previewLayerProperties { layer in
+            var effect = layer.curves ?? LayerCurveEffect(isEnabled: false)
+            effect[channel] = values; layer.curves = effect
+        }
     }
 
     var selectedToneWillEnable: Bool {
@@ -906,6 +959,9 @@ final class EditorSession: ObservableObject {
         case .clearLayer(let clear):
             guard page.layers.contains(where: { $0.id == clear.layerID }) else { return }
             renderer.commitClear(clear)
+        case .bucketFill(let fill):
+            guard page.layers.contains(where: { $0.id == fill.layerID }) else { return }
+            renderer.commitBucketFill(fill)
         case .lassoFill(let fill):
             guard page.layers.contains(where: { $0.id == fill.layerID }) else { return }
             renderer.commitLassoFill(fill)

@@ -19,6 +19,7 @@ struct CanvasSurfaceRepresentable: UIViewRepresentable {
         uiView.session = session
         session.renderer.viewportTintLayerID = session.showsTargetTint ? session.selectedLayerID : nil
         session.renderer.viewportTintTarget = session.selectedEditTarget
+        session.renderer.showsSelectionTint = session.showsSelectionTint
         uiView.refreshBrushCursor()
         uiView.setNeedsDisplay()
     }
@@ -33,6 +34,7 @@ final class CanvasSurface: MTKView {
             }
         }
     }
+    private var lastLayoutSize: CGSize = .zero
     private let cursorOutline = CAShapeLayer()
     private let cursorHighlight = CAShapeLayer()
     private var hoverPoint: CGPoint?
@@ -96,6 +98,12 @@ final class CanvasSurface: MTKView {
         super.layoutSubviews()
         session?.renderer.fitIfNeeded(viewSize: bounds.size)
         refreshBrushCursor()
+        // This MTKView draws on demand. UIKit can otherwise stretch the last
+        // presented drawable to its new bounds until the next canvas gesture.
+        if bounds.size != lastLayoutSize {
+            lastLayoutSize = bounds.size
+            setNeedsDisplay()
+        }
     }
 
     override func didMoveToWindow() {
@@ -125,7 +133,7 @@ final class CanvasSurface: MTKView {
         let position = contactPoint ?? hoverPoint
         let radius: CGFloat
         if let session, let position,
-           !session.selectedTool.isRegionTool,
+           !session.selectedTool.isRegionTool, session.selectedTool != .bucket,
            !session.activeModifiers.contains(.option), pickingTouch == nil,
            bounds.contains(position),
            session.renderer.isInsideCanvas(session.renderer.canvasPoint(from: position)) {
@@ -196,7 +204,7 @@ final class CanvasSurface: MTKView {
                                    shift: shiftDown, option: optionDown)
             return
         }
-        if !session.selectedTool.isRegionTool, pickingTouch == nil, optionDown,
+        if !session.selectedTool.isRegionTool, session.selectedTool != .bucket, pickingTouch == nil, optionDown,
            let pencil = touches.first(where: { $0.type == .pencil }) {
             pickingTouch = pencil
             hideBrushCursor()

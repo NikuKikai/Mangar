@@ -74,11 +74,13 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private let paintBoundsPipeline: MTLComputePipelineState
     private let usesRasterOrderGroups: Bool
     private var groupBackdrops: [Int: MTLTexture] = [:]
+    private var curveTextures: [UUID: (LayerCurveEffect, MTLTexture)] = [:]
     private let layerCompositePipeline: MTLRenderPipelineState
     private var groupTargets: [Int: MTLTexture] = [:]
     private let tilePipeline: MTLRenderPipelineState
     private let shapePipeline: MTLRenderPipelineState
     private let checkerPipeline: MTLRenderPipelineState
+    private let selectionTintPipeline: MTLRenderPipelineState
     private let selectionOutlinePipeline: MTLRenderPipelineState
     private let selectionRectPipeline: MTLRenderPipelineState
     private let pageGuidePipeline: MTLRenderPipelineState
@@ -98,6 +100,11 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private var displayLinkTarget: SelectionDisplayLinkTarget?
     private(set) var dirtyBounds: [TileKey: CGRect] = [:]
     weak var view: MTKView?
+    var showsSelectionTint = false {
+        didSet {
+            if showsSelectionTint != oldValue { updateSelectionAnimation(); view?.setNeedsDisplay() }
+        }
+    }
     var viewportTintLayerID: UUID?
     var viewportTintTarget: LayerEditTarget = .content
     var page: PageRecord
@@ -141,6 +148,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
               let shapeFragment = library.makeFunction(name: "shapeFragment"),
               let checkerFragment = library.makeFunction(name: "checkerFragment"),
               let selectionOutlineFragment = library.makeFunction(name: "selectionOutlineFragment"),
+              let selectionTintFragment = library.makeFunction(name: "selectionTintFragment"),
               let selectionRectFragment = library.makeFunction(name: "selectionRectOutlineFragment"),
               let pageGuideFragment = library.makeFunction(name: "pageGuideFragment") else {
             throw RendererError.unavailable
@@ -202,6 +210,15 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         outlineDescriptor.fragmentFunction = selectionOutlineFragment
         outlineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         self.selectionOutlinePipeline = try device.makeRenderPipelineState(descriptor: outlineDescriptor)
+        outlineDescriptor.fragmentFunction = selectionTintFragment
+        let tintAttachment = outlineDescriptor.colorAttachments[0]!
+        tintAttachment.isBlendingEnabled = true
+        tintAttachment.sourceRGBBlendFactor = .one
+        tintAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        tintAttachment.sourceAlphaBlendFactor = .one
+        tintAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        self.selectionTintPipeline = try device.makeRenderPipelineState(descriptor: outlineDescriptor)
+        tintAttachment.isBlendingEnabled = false
         outlineDescriptor.fragmentFunction = selectionRectFragment
         self.selectionRectPipeline = try device.makeRenderPipelineState(descriptor: outlineDescriptor)
         outlineDescriptor.fragmentFunction = pageGuideFragment
@@ -626,7 +643,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
 
     private func updateSelectionAnimation() {
         displayLink?.isPaused = !viewportVisible || (selectionPreviewRect == nil && lassoPreviewPoints.isEmpty &&
-            !(selection.map { $0.defaultCoverage != 0 || !$0.tileBounds.isEmpty } ?? false)
+            !(!showsSelectionTint && (selection.map { $0.defaultCoverage != 0 || !$0.tileBounds.isEmpty } ?? false))
         )
     }
 
@@ -798,8 +815,11 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     }
 
     func commitLassoFill(_ fill: LassoFillCommand) {
+        commitRegionFill(fill, masks: polygonMasks(fill.points))
+    }
+
+    func commitRegionFill(_ fill: LassoFillCommand, masks: [SelectionTileKey: MTLTexture]) {
         brushChanges.invalidate(layerID: fill.layerID)
-        let masks = polygonMasks(fill.points)
         guard !masks.isEmpty, let command = queue.makeCommandBuffer() else { return }
         let size = CanvasConstants.tileSize
         var pending: [(TileKey, MTLTexture, MTLBuffer)] = []
@@ -847,6 +867,9 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         fitIfNeeded(viewSize: view.bounds.size)
+        // Resizing the backing texture must invalidate an on-demand canvas,
+        // including after the initial fit has already completed.
+        view.setNeedsDisplay()
     }
 
     func draw(in view: MTKView) {
@@ -855,7 +878,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
               let drawable = view.currentDrawable,
               let commandBuffer = queue.makeCommandBuffer() else { return }
         render(pass: pass, commandBuffer: commandBuffer,
-               viewport: view.drawableSize,
+               viewport: CGSize(width: drawable.texture.width, height: drawable.texture.height),
                zoom: Float(zoom * view.contentScaleFactor),
                rotation: Float(rotation), includeChecker: true,
                pan: SIMD2<Float>(Float(pan.x * view.contentScaleFactor),
@@ -867,8 +890,9 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private func render(pass: MTLRenderPassDescriptor, commandBuffer: MTLCommandBuffer,
                         viewport: CGSize, zoom: Float, rotation: Float,
                         includeChecker: Bool, pan: SIMD2<Float>) {
+        let inspectingSelection = includeChecker && showsSelectionTint && selection != nil
         let tintID = includeChecker ? viewportTintLayerID : nil
-        let needsCompositing = tintID != nil || page.layers.contains { $0.hasMask || $0.opacity != 1 || $0.blendMode != .normal || $0.tone?.isEnabled == true }
+        let needsCompositing = !inspectingSelection && (tintID != nil || page.layers.contains { $0.hasMask || $0.opacity != 1 || $0.blendMode != .normal || $0.tone?.isEnabled == true || $0.curves?.isEnabled == true })
         let composite = needsCompositing ? composeGroup(parentID: nil, depth: 0,
             commandBuffer: commandBuffer, viewport: viewport, zoom: zoom,
             rotation: rotation, pan: pan, tintLayerID: tintID, tintTarget: viewportTintTarget) : nil
@@ -882,6 +906,12 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             encoder.setRenderPipelineState(checkerPipeline)
             encoder.setVertexBytes(&paper, length: MemoryLayout<QuadUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
+        if inspectingSelection {
+            drawSelectionOutline(encoder: encoder, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
+            drawPageGuides(encoder: encoder, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
+            encoder.endEncoding()
+            return
         }
         if let composite {
             encoder.setRenderPipelineState(tilePipeline)
@@ -1009,6 +1039,10 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                 mode: tinted ? 0 : layer.blendMode.shaderIndex)
             // Bit 0 applies a mask; bit 1 displays raw alpha as blue.
             uniforms.padding = (applyMask ? 1 : 0) | (tinted ? 2 : 0)
+            if let effect = layer.curves, effect.isEnabled && !tinted {
+                uniforms.padding |= 4
+                encoder?.setFragmentTexture(curveTexture(effect, layerID: layer.id), index: 3)
+            } else { encoder?.setFragmentTexture(fullMask, index: 3) }
             if let tone = layer.tone, tone.isEnabled && !tinted {
                 let dpi = Float(page.comicLayout?.dpi ?? 350)
                 uniforms.tone = SIMD4<Float>(dpi / Float(max(1, tone.frequency)),
@@ -1034,6 +1068,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                 encoder = startEncoder()
                 guard let encoder else { return nil }
                 encoder.setFragmentTexture(layerMask ?? fullMask, index: 2)
+                encoder.setFragmentTexture(layer.curves.map { curveTexture($0, layerID: layer.id) } ?? fullMask, index: 3)
                 var screen = QuadUniforms(origin: .zero, size: vp, viewport: vp,
                                           zoom: 1, rotation: 0, pan: .zero)
                 encoder.setVertexBytes(&screen, length: MemoryLayout<QuadUniforms>.stride, index: 0)
@@ -1193,12 +1228,12 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                            Int(floor((canvasCorners.map(\.y).max()! + 2) / Float(size))))
             if minX <= maxX, minY <= maxY {
                 let fallback = selection.defaultCoverage == 0 ? emptyMask : fullMask
-                encoder.setRenderPipelineState(selectionOutlinePipeline)
+                encoder.setRenderPipelineState(showsSelectionTint ? selectionTintPipeline : selectionOutlinePipeline)
                 for y in minY...maxY {
                     for x in minX...maxX {
                         let key = SelectionTileKey(x: x, y: y)
                         if selection.defaultCoverage == 0 &&
-                           !selection.outlineKeys.contains(key) { continue }
+                           (showsSelectionTint ? selection.tileBounds[key] == nil : !selection.outlineKeys.contains(key)) { continue }
                         let origin = SIMD2<Float>(Float(x * size), Float(y * size))
                         var quad = QuadUniforms(origin: origin,
                             size: SIMD2<Float>(Float(min(size, page.width - x * size)),
@@ -1280,6 +1315,22 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         return SIMD3<Float>(min(1, Float(pixel[2]) / 255 / alpha),
                             min(1, Float(pixel[1]) / 255 / alpha),
                             min(1, Float(pixel[0]) / 255 / alpha))
+    }
+
+    private func curveTexture(_ effect: LayerCurveEffect, layerID: UUID) -> MTLTexture {
+        if let cached = curveTextures[layerID], cached.0 == effect { return cached.1 }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: 256, height: 4, mipmapped: false)
+        descriptor.storageMode = .shared; descriptor.usage = .shaderRead
+        let texture = device.makeTexture(descriptor: descriptor)!
+        let values = effect.lookupTable
+        values.withUnsafeBytes { texture.replace(region: MTLRegionMake2D(0, 0, 256, 4), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 256 * 4) }
+        curveTextures[layerID] = (effect, texture)
+        return texture
+    }
+
+    func selectionReadback() -> (tiles: [SelectionTileKey: Data]?, defaultCoverage: UInt8) {
+        prepareForReadback()
+        return (selection?.tiles.mapValues { bytes(of: $0) }, selection?.defaultCoverage ?? 255)
     }
 
     func exportPNG(cropToContent: Bool) throws -> Data {

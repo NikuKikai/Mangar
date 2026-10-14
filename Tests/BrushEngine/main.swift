@@ -15,6 +15,14 @@ struct BrushEngineChecks {
             String(contentsOf: root.appendingPathComponent("Mangar/Brushes/GPU/PigmentMixing.txt"), encoding: .utf8) + "\n" +
             String(contentsOf: root.appendingPathComponent("Mangar/Brushes/GPU/BrushKernels.txt"), encoding: .utf8)
         source += """
+        kernel void layerCurveCheck(device float4 *out [[buffer(0)]], texture2d<float> curves [[texture(0)]], uint i [[thread_position_in_grid]]) {
+            if (i != 0) return;
+            LayerCompositeUniforms u = {}; u.padding = 4;
+            out[0] = applyLayerCurve(float4(0.1, 0.2, 0.3, 0.5), curves, u.padding);
+            out[1] = applyLayerCurve(float4(0), curves, u.padding);
+            u.padding = 0;
+            out[2] = applyLayerCurve(float4(0.1, 0.2, 0.3, 0.5), curves, u.padding);
+        }
         kernel void pigmentMixCheck(device float4 *out [[buffer(0)]], uint i [[thread_position_in_grid]]) {
             if (i != 0) return;
             out[0] = float4(spectral_mix(float3(1,1,0), float3(0,0,1), 0.5), 1);
@@ -60,6 +68,64 @@ struct BrushEngineChecks {
             precondition(condition(), "FAILED: \(name)")
             FileHandle.standardOutput.write(Data("PASS \(name)\n".utf8))
         }
+        let identityEffect = LayerCurveEffect()
+        check((0...255).allSatisfy { abs(identityEffect.map(Double($0)/255, channel: .master) - Double($0)/255) < 0.000001 }, "Layer curve identity")
+        var effect = LayerCurveEffect(); effect.master = [1, 0.75, 0.5, 0.25, 0]
+        let lutDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: 256, height: 4, mipmapped: false)
+        lutDescriptor.storageMode = .shared; lutDescriptor.usage = .shaderRead
+        let lut = device.makeTexture(descriptor: lutDescriptor)!
+        let lutValues = effect.lookupTable
+        lutValues.withUnsafeBytes { lut.replace(region: MTLRegionMake2D(0, 0, 256, 4), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 1024) }
+        let curvePipeline = try await device.makeComputePipelineState(function: library.makeFunction(name: "layerCurveCheck")!)
+        let curveOutput = device.makeBuffer(length: 48)!
+        let curveCommand = queue.makeCommandBuffer()!, curveEncoder = curveCommand.makeComputeCommandEncoder()!
+        curveEncoder.setComputePipelineState(curvePipeline); curveEncoder.setBuffer(curveOutput, offset: 0, index: 0); curveEncoder.setTexture(lut, index: 0)
+        curveEncoder.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)); curveEncoder.endEncoding()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            curveCommand.addCompletedHandler { _ in continuation.resume() }; curveCommand.commit()
+        }
+        let curveResult = curveOutput.contents().bindMemory(to: SIMD4<Float>.self, capacity: 3)
+        check(abs(curveResult[0].x - 0.4) < 0.0001 && abs(curveResult[0].y - 0.3) < 0.0001 && abs(curveResult[0].z - 0.2) < 0.0001 && curveResult[0].w == 0.5,
+            "Metal curve operates on straight color and preserves alpha")
+        check(curveResult[1] == .zero && curveResult[2] == SIMD4<Float>(0.1, 0.2, 0.3, 0.5), "Metal curve transparent pixels and disabled bypass")
+        var effectLayer = LayerRecord(name: "curve check"); effectLayer.curves = effect
+        let decodedEffectLayer = try JSONDecoder().decode(LayerRecord.self, from: JSONEncoder().encode(effectLayer))
+        check(decodedEffectLayer.curves == effect, "Layer curve serialization")
+        let oldLayerJSON = "{\"id\":\"\(UUID().uuidString)\",\"name\":\"old\",\"kind\":\"paint\",\"isVisible\":true,\"opacity\":1}"
+        let oldLayer = try JSONDecoder().decode(LayerRecord.self, from: Data(oldLayerJSON.utf8))
+        check(oldLayer.curves == nil, "Legacy layer has no curve effect")
+
+        func region(_ source: [SelectionTileKey: Data], width: Int = 32, height: Int = 32, gap: Int = 0,
+                    selection: [SelectionTileKey: Data]? = nil, defaultCoverage: UInt8 = 255) -> [FillSpan] {
+            BucketRegionResolver.resolve(width: width, height: height, x: 16, y: 16, target: .content,
+                source: source, settings: BucketSettings(tolerance: 0, closeGap: gap), selection: selection, selectionDefault: defaultCoverage)
+        }
+        func countRegion(_ spans: [FillSpan]) -> Int { spans.reduce(0) { $0 + $1.x1 - $1.x0 } }
+        var boundary = [UInt8](repeating: 0, count: 256 * 256 * 4)
+        for y in 8...24 { for x in 8...24 where x == 8 || x == 24 || y == 8 || y == 24 { boundary[(y*256+x)*4+3] = 255 } }
+        let regionKey = SelectionTileKey(x: 0, y: 0)
+        check(countRegion(region([regionKey: Data(boundary)])) == 15 * 15, "Bucket enclosed region")
+        boundary[(8*256+16)*4+3] = 0
+        let openCount = countRegion(region([regionKey: Data(boundary)]))
+        let closed = region([regionKey: Data(boundary)], gap: 2)
+        check(openCount > 800 && countRegion(closed) < 250 && countRegion(closed) >= 225, "Bucket close gap stops leakage and recovers edge strip")
+        boundary[(8*256+15)*4+3] = 0; boundary[(8*256+17)*4+3] = 0
+        check(countRegion(region([regionKey: Data(boundary)], gap: 2)) > 800, "Bucket preserves gaps larger than closure diameter")
+        check(countRegion(region([regionKey: Data(boundary)], gap: 4)) < 260, "Bucket closure strength bridges larger gap")
+        check(countRegion(region([:], width: 600, height: 300)) == 600 * 300, "Bucket sparse transparent canvas across tiles and partial page edges")
+        var wallTile = [UInt8](repeating: 0, count: 256 * 256 * 4)
+        for y in 0..<256 { wallTile[(y*256+44)*4+3] = 255 }
+        let acrossWall = region([SelectionTileKey(x:1,y:0):Data(wallTile), SelectionTileKey(x:1,y:1):Data(wallTile)], width:600,height:300)
+        check(countRegion(acrossWall) == 300 * 300 && acrossWall.allSatisfy { $0.x1 <= 300 }, "Bucket connected region crosses sparse tile seam and stops at distant wall")
+        check(countRegion(region([:], selection: [:], defaultCoverage: 0)) == 0, "Bucket empty selection is a no-op")
+        var selectedRegion = [UInt8](repeating: 0, count: 256 * 256)
+        for y in 12..<20 { for x in 12..<20 { selectedRegion[y*256+x] = 128 } }
+        check(countRegion(region([:], selection: [regionKey: Data(selectedRegion)], defaultCoverage: 0)) == 64, "Bucket selection connectivity accepts fractional coverage")
+        check(countRegion(BucketRegionResolver.resolve(width: 32, height: 32, x: 16, y: 16, target: .mask, source: [:], settings: BucketSettings())) == 1024,
+            "Bucket implicit mask is white")
+        let fillRecord = BucketFillCommand(layerID: layer, spans: closed, brush: MangaBrushes.configuration(.gPen), target: .content, erases: false)
+        let restoredFill = try JSONDecoder().decode(BucketFillCommand.self, from: JSONEncoder().encode(fillRecord))
+        check(restoredFill.spans == closed, "Bucket command freezes compact region for replay")
         check(MemoryLayout<BrushGPUInput>.stride == 32 && MemoryLayout<BrushGPUUniforms>.stride == 224, "Metal ABI")
         let lowG = area(paint(dot(.gPen, pressure: 0.15)))
         let highG = area(paint(dot(.gPen)))
@@ -222,6 +288,65 @@ struct BrushEngineChecks {
         let mask = device.makeTexture(descriptor: descriptor)!
         let maskData = [UInt8](repeating: 128, count: 256*256)
         maskData.withUnsafeBytes { mask.replace(region: MTLRegionMake2D(0,0,256,256), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 256) }
+        func runRegionKernel(maskTarget: Bool, erases: UInt32) async throws -> [UInt8] {
+            let fmt: MTLPixelFormat = maskTarget ? .r8Unorm : .rgba8Unorm
+            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: fmt, width: 256, height: 256, mipmapped: false)
+            desc.storageMode = .shared; desc.usage = [.shaderRead, .shaderWrite]
+            let base = device.makeTexture(descriptor: desc)!, out = device.makeTexture(descriptor: desc)!
+            let channelCount = maskTarget ? 1 : 4
+            let initial = [UInt8](repeating: maskTarget || erases != 0 ? 255 : 0, count: 256 * 256 * channelCount)
+            initial.withUnsafeBytes { base.replace(region: MTLRegionMake2D(0,0,256,256), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 256 * channelCount) }
+            let shape = device.makeTexture(descriptor: descriptor)!
+            let full = [UInt8](repeating: 255, count: 256*256)
+            full.withUnsafeBytes { shape.replace(region: MTLRegionMake2D(0,0,256,256), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 256) }
+            let pipeline = try await device.makeComputePipelineState(function: library.makeFunction(name: maskTarget ? "fillLassoLayerMask" : "fillLasso")!)
+            let c = queue.makeCommandBuffer()!, e = c.makeComputeCommandEncoder()!
+            var color = SIMD4<Float>(0.2, 0.6, 0.8, 0.5), erase = erases
+            var bounds: [UInt32] = [256,256,0,0]
+            let b = device.makeBuffer(bytes: &bounds, length: 16)!
+            e.setComputePipelineState(pipeline); e.setTexture(base,index:0); e.setTexture(shape,index:1); e.setTexture(mask,index:2); e.setTexture(out,index:3)
+            e.setBytes(&color,length:16,index:0); e.setBuffer(b,offset:0,index:1); e.setBytes(&erase,length:4,index:2)
+            e.dispatchThreads(MTLSize(width:256,height:256,depth:1),threadsPerThreadgroup:MTLSize(width:16,height:16,depth:1)); e.endEncoding()
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in c.addCompletedHandler { _ in continuation.resume() }; c.commit() }
+            check(c.status == .completed, "Bucket Metal dispatch completed")
+            let extents = b.contents().bindMemory(to: UInt32.self,capacity:4)
+            check(extents[0] == 0 && extents[1] == 0 && extents[2] == 256 && extents[3] == 256, "Bucket GPU changed bounds")
+            return bytes(out)
+        }
+        let regionPaint = try await runRegionKernel(maskTarget:false,erases:0)
+        check(regionPaint[3] == 64 && abs(Int(regionPaint[0])-13) <= 1 && abs(Int(regionPaint[1])-38) <= 1,
+            "Bucket GPU applies fractional selection and opacity once")
+        let regionErase = try await runRegionKernel(maskTarget:false,erases:1)
+        check(regionErase[3] == 191, "Bucket transparent color erases by selected coverage")
+        let regionMask = try await runRegionKernel(maskTarget:true,erases:0)
+        check(abs(Int(regionMask[0])-204) <= 1, "Bucket R8 mask fill preserves partial coverage")
+        let regionMaskErase = try await runRegionKernel(maskTarget:true,erases:1)
+        check(regionMaskErase[0] == 255, "Bucket R8 transparent color restores white")
+
+        struct TintQuad { var origin = SIMD2<Float>(0,0); var size = SIMD2<Float>(256,256); var viewport = SIMD2<Float>(256,256); var zoom: Float = 1; var rotation: Float = 0; var pan = SIMD2<Float>(0,0) }
+        struct TintUniforms { var origin = SIMD2<Float>(0,0); var canvas = SIMD2<Float>(256,256); var zoom: Float = 1; var phase: Float = 0 }
+        let tintInput = device.makeTexture(descriptor: descriptor)!
+        var tintValues = [UInt8](repeating: 0, count: 256*256)
+        for y in 0..<256 { for x in 0..<256 { tintValues[y*256+x] = [0,64,128,255][x/64] } }
+        tintValues.withUnsafeBytes { tintInput.replace(region: MTLRegionMake2D(0,0,256,256), mipmapLevel:0, withBytes:$0.baseAddress!, bytesPerRow:256) }
+        let tintDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width:256, height:256, mipmapped:false)
+        tintDesc.storageMode = .shared; tintDesc.usage = .renderTarget
+        let tintOut = device.makeTexture(descriptor:tintDesc)!
+        let tintPipelineDesc = MTLRenderPipelineDescriptor()
+        tintPipelineDesc.vertexFunction = library.makeFunction(name:"tileVertex"); tintPipelineDesc.fragmentFunction = library.makeFunction(name:"selectionTintFragment")
+        tintPipelineDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
+        let tintPipeline = try await device.makeRenderPipelineState(descriptor:tintPipelineDesc)
+        let tintPass = MTLRenderPassDescriptor(); tintPass.colorAttachments[0].texture = tintOut
+        tintPass.colorAttachments[0].loadAction = .clear; tintPass.colorAttachments[0].storeAction = .store
+        let tc = queue.makeCommandBuffer()!, te = tc.makeRenderCommandEncoder(descriptor:tintPass)!
+        var tq = TintQuad(), tu = TintUniforms()
+        te.setRenderPipelineState(tintPipeline); te.setVertexBytes(&tq,length:MemoryLayout<TintQuad>.stride,index:0)
+        te.setFragmentBytes(&tu,length:MemoryLayout<TintUniforms>.stride,index:0); te.setFragmentTexture(tintInput,index:0)
+        te.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:6); te.endEncoding()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in tc.addCompletedHandler { _ in continuation.resume() }; tc.commit() }
+        let tintBytes = bytes(tintOut)
+        let observedTint = [32,96,160,224].map { Int(tintBytes[(128*256+$0)*4+3]) }
+        check(observedTint == [0,64,128,255], "Selection tint renders continuous R8 values including below one half")
         let selectionKey = SelectionTileKey(x: 0, y: 0)
         let selection = SelectionSnapshot(defaultCoverage: 0, tiles: [selectionKey: mask],
             tileBounds: [selectionKey: CGRect(x: 0, y: 0, width: 256, height: 256)],

@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 import Metal
 
-struct SelectionTileKey: Hashable {
+nonisolated struct SelectionTileKey: Hashable, Sendable {
     var x: Int
     var y: Int
 }

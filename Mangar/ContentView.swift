@@ -254,7 +254,9 @@ private struct EditorWorkspace: View {
     }
     @ObservedObject var session: EditorSession
     let showProjects: () -> Void
-    @State private var showToneParameters = false
+    private enum LayerEffectPanel { case tone, curves }
+    @State private var effectPanel: LayerEffectPanel?
+    @State private var selectionTool: DrawingTool = .selection
     @State private var showPressureCurve = false
     @State private var showBrushSettings = false
     @State private var dynamicsParameter: BrushParameter?
@@ -292,7 +294,7 @@ private struct EditorWorkspace: View {
                 Rectangle().fill(Color.black.opacity(0.45)).frame(width: 1)
                 sidebar
                     .disabled(workspaceView == .pages)
-                    .frame(width: 192)
+                    .frame(width: 224)
                     .background(Color(red: 0.15, green: 0.16, blue: 0.17))
             }
         }
@@ -458,6 +460,26 @@ private struct EditorWorkspace: View {
                 .accessibilityLabel("画布回正，保持缩放与视口中心")
             }
             Spacer(minLength: 8)
+            if workspaceView == .canvas, session.hasSelection {
+                HStack(spacing: 1) {
+                    Button { session.showsSelectionTint.toggle() } label: {
+                        Image(systemName: "rectangle.dashed.badge.record")
+                            .frame(width: 24, height: 24)
+                            .foregroundStyle(session.showsSelectionTint ? Color.blue : Color.primary)
+                            .background(session.showsSelectionTint ? Color.blue.opacity(0.25) : .clear)
+                    }.help("显示选区覆盖率（蓝色）").accessibilityLabel("显示选区连续覆盖率")
+                        .accessibilityAddTraits(session.showsSelectionTint ? [.isSelected] : [])
+                    Button { session.changeSelection(.invert) } label: {
+                        Image(systemName: "circle.lefthalf.filled").frame(width: 24, height: 24)
+                    }.help("反转选区").accessibilityLabel("反转选区")
+                        .keyboardShortcut("i", modifiers: [.command, .shift])
+                    Button { session.changeSelection(.clear) } label: {
+                        Image(systemName: "selection.pin.in.out").frame(width: 24, height: 24)
+                    }.help("清除选区").accessibilityLabel("清除选区")
+                        .keyboardShortcut("d", modifiers: [.command])
+                }
+                Rectangle().fill(.white.opacity(0.18)).frame(width: 1, height: 18).padding(.horizontal, 3)
+            }
             if workspaceView == .pages {
                 Text("\(session.manifest.logicalPageCount) 页")
                     .foregroundStyle(.secondary)
@@ -483,10 +505,16 @@ private struct EditorWorkspace: View {
                     .foregroundStyle(.secondary)
                 Button("全选") { session.changeSelection(.selectAll) }
                     .keyboardShortcut("a", modifiers: [.command])
-                Button("反选") { session.changeSelection(.invert) }
-                    .keyboardShortcut("i", modifiers: [.command, .shift])
-                Button("取消") { session.changeSelection(.clear) }
-                    .keyboardShortcut("d", modifiers: [.command])
+            } else if session.selectedTool == .bucket {
+                BucketToolIcon().frame(width: 17, height: 17)
+                Text(session.isFilling ? "计算填充…" : "油漆桶")
+                Text("容差").font(.system(size: 10)).foregroundStyle(.secondary)
+                FlatSlider(value: $session.bucketSettings.tolerance, range: 0...1).frame(width: 65)
+                Text("\(Int(session.bucketSettings.tolerance * 100))%").font(.system(size: 10)).monospacedDigit().frame(width: 28)
+                Text("闭合").font(.system(size: 10)).foregroundStyle(.secondary)
+                FlatSlider(value: Binding(get: { Double(session.bucketSettings.closeGap) },
+                    set: { session.bucketSettings.closeGap = Int($0.rounded()) }), range: 0...32).frame(width: 65)
+                Text("\(session.bucketSettings.closeGap) px").font(.system(size: 10)).monospacedDigit().frame(width: 32)
             } else if session.selectedTool == .lassoFill {
                 Image(systemName: "lasso")
                 Text("套索填充")
@@ -607,11 +635,26 @@ private struct EditorWorkspace: View {
                 .help("水彩笔 · 向右滑动选择笔刷")
             toolButton(.eraser, icon: "eraser.fill", name: "橡皮擦")
                 .keyboardShortcut("e", modifiers: [])
-            toolButton(.selection, icon: "rectangle.dashed", name: "矩形选区")
-                .keyboardShortcut("m", modifiers: [])
-            toolButton(.lassoSelection, icon: "lasso", name: "套索选区")
-                .keyboardShortcut("l", modifiers: [])
+            SlideSelectToolControl(items: [
+                SlideSelectToolItem(id: DrawingTool.selection.rawValue, name: "矩形选区", icon: "rectangle.dashed"),
+                SlideSelectToolItem(id: DrawingTool.lassoSelection.rawValue, name: "套索选区", icon: "lasso")
+            ], currentID: selectionTool.rawValue, selected: session.selectedTool.isSelectionTool,
+                activate: { activateSelectionTool(selectionTool) },
+                choose: { id in
+                    if let tool = DrawingTool(rawValue: id), tool.isSelectionTool { activateSelectionTool(tool) }
+                })
+                .frame(width: 34, height: 34)
+                .background {
+                    Group {
+                        Button("矩形选区") { activateSelectionTool(.selection) }
+                            .keyboardShortcut("m", modifiers: [])
+                        Button("套索选区") { activateSelectionTool(.lassoSelection) }
+                            .keyboardShortcut("l", modifiers: [])
+                    }.hidden().accessibilityHidden(true)
+                }
+                .help("选区 · 向右滑动选择矩形或套索")
             toolButton(.lassoFill, icon: "lasso", name: "套索填充")
+            toolButton(.bucket, icon: "paintbrush.fill", name: "油漆桶")
                 .keyboardShortcut("g", modifiers: [])
             Spacer(minLength: 12)
             ColorPresetControl(color: AppColor(session.brush), selected: !session.usesTransparentColor,
@@ -655,14 +698,23 @@ private struct EditorWorkspace: View {
         .padding(.bottom, 4)
     }
 
+    private func activateSelectionTool(_ tool: DrawingTool) {
+        session.cancelSelection()
+        session.cancelStroke()
+        selectionTool = tool
+        session.selectedTool = tool
+    }
+
     private func toolButton(_ tool: DrawingTool, icon: String, name: String) -> some View {
         Button {
             session.cancelSelection()
             session.cancelStroke()
             session.selectedTool = tool
         } label: {
-            Image(systemName: icon)
-                .font(.system(size: 17))
+            Group {
+                if tool == .bucket { BucketToolIcon().frame(width: 19, height: 19) }
+                else { Image(systemName: icon).font(.system(size: 17)) }
+            }
                 .frame(width: 34, height: 34)
                 .overlay(alignment: .bottomTrailing) {
                     if tool == .lassoFill {
@@ -681,7 +733,8 @@ private struct EditorWorkspace: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             layerControls
-            if showToneParameters { toneParameters }
+            if effectPanel == .tone { toneParameters }
+            if effectPanel == .curves { LayerCurveParameters(session: session, close: { effectPanel = nil }) }
             layerList
         }
         .buttonStyle(ImmediateButtonStyle())
@@ -733,11 +786,17 @@ private struct EditorWorkspace: View {
             HStack(spacing: 0) {
                 SlideOutButton(icon: "circle.grid.3x3.fill", label: "网点效果",
                     isOn: !session.selectedLayerIDs.isEmpty && !session.selectedToneWillEnable,
-                    isExpanded: showToneParameters,
+                    isExpanded: effectPanel == .tone,
                     action: { session.toggleSelectedTone() },
-                    expand: { showToneParameters = true })
+                    expand: { session.endLayerPropertyEdit(); effectPanel = .tone })
                     .frame(width: 23, height: 23)
                     .disabled(session.selectedLayerID == nil)
+                SlideOutButton(icon: "chart.xyaxis.line", label: "曲线调整",
+                    isOn: !session.selectedLayerIDs.isEmpty && !session.selectedCurvesWillEnable,
+                    isExpanded: effectPanel == .curves,
+                    action: { session.toggleSelectedCurves() },
+                    expand: { session.endLayerPropertyEdit(); effectPanel = .curves })
+                    .frame(width: 23, height: 23).disabled(session.selectedLayerID == nil)
                 Button { session.showsTargetTint.toggle() } label: {
                     layerActionIcon("drop.halffull")
                         .foregroundStyle(session.showsTargetTint ? Color.blue : Color.primary)
@@ -770,7 +829,7 @@ private struct EditorWorkspace: View {
             HStack(spacing: 4) {
                 Text("网点参数").font(.system(size: 10, weight: .semibold))
                 Spacer(minLength: 0)
-                Button { showToneParameters = false } label: {
+                Button { session.endLayerPropertyEdit(); effectPanel = nil } label: {
                     Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
                         .frame(width: 18, height: 18)
                 }
@@ -870,119 +929,137 @@ private struct EditorWorkspace: View {
                 transaction.disablesAnimations = true
             }
             .accessibilityLabel(layer.isVisible ? "隐藏图层" : "显示图层")
-            HStack(spacing: 2) {
+            GeometryReader { geometry in
+                let inset = CGFloat(1 + entry.depth * 10)
+                let trailingWidth: CGFloat = layer.isLocked ? 42 : 21
+                let contentWidth = max(0, geometry.size.width - inset - 1 - trailingWidth)
+                let textWidth = max(0, contentWidth - 26 - (layer.hasMask ? 26 : 0))
                 HStack(spacing: 2) {
-                    Group {
-                        if layer.kind == .folder {
-                            Button {
-                                var transaction = Transaction(animation: nil)
-                                transaction.disablesAnimations = true
-                                withTransaction(transaction) {
-                                    if !collapsedFolders.insert(layer.id).inserted {
-                                        collapsedFolders.remove(layer.id)
-                                    }
-                                }
-                            } label: {
-                                HStack(spacing: 1) {
-                                    Image(systemName: collapsedFolders.contains(layer.id) ? "chevron.right" : "chevron.down")
-                                        .contentTransition(.identity)
-                                        .font(.system(size: 8))
-                                        .frame(width: 8)
-                                        .foregroundStyle(layerDropTarget?.parentID == layer.id ? Color.accentColor : Color.primary)
-                                        .background(layerDropTarget?.parentID == layer.id
-                                                    ? Color.accentColor.opacity(0.22) : .clear)
-                                    Image(systemName: "folder.fill")
-                                        .foregroundStyle(.gray)
-                                        .frame(width: 15, alignment: .leading)
-                                }
-                                .frame(width: 24, height: 35)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(ImmediateLayerButtonStyle())
-                            .transaction { transaction in
-                                transaction.animation = nil
-                                transaction.disablesAnimations = true
-                            }
-                            .background { LayerRowActionBoundary() }
-                            .accessibilityLabel(collapsedFolders.contains(layer.id) ? "展开文件夹" : "折叠文件夹")
-                        } else {
-                            layerThumbnail(layer)
-                                .overlay(Rectangle().stroke(
-                                    layer.id == session.selectedLayerID && session.selectedEditTarget == .content
-                                    ? Color.accentColor : .clear, lineWidth: 2))
-                                .overlay { layerTargetCapture(layer.id, target: .content) }
-                        }
-                    }
-                    .frame(height: 28)
-                    if layer.hasMask {
+                    HStack(spacing: 2) {
                         Group {
-                            if let image = session.renderer.maskThumbnail(for: layer.id) {
-                                Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
-                            } else { Color.white }
-                        }
-                        .frame(width: 24, height: 24)
-                        .background(Color.black.opacity(0.25))
-                        .overlay(Rectangle().stroke(
-                            layer.id == session.selectedLayerID && session.selectedEditTarget == .mask
-                            ? Color.accentColor : Color.white.opacity(0.25), lineWidth:
-                                layer.id == session.selectedLayerID && session.selectedEditTarget == .mask ? 2 : 1))
-                        .overlay { layerTargetCapture(layer.id, target: .mask) }
-                    }
-                    VStack(alignment: .leading, spacing: 1) {
-                        LayerNameControl(name: layer.name, primary: layer.id == session.selectedLayerID,
-                            rename: { session.renameLayer(layer.id, to: $0) })
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 13)
-                        HStack(spacing: 2) {
-                            VerticalDragProperty(text: String(layer.blendMode.title.prefix(2)), label: "混合模式",
-                                value: .choice(Int(layer.blendMode.shaderIndex), LayerBlendMode.allCases.map(\.title)),
-                                begin: { session.beginLayerPropertyEdit(layer.id) },
-                                change: { index in
-                                    session.previewLayerBlendMode(LayerBlendMode.allCases[Int(index)])
-                                }, end: { session.endLayerPropertyEdit(commit: $0) })
-                            .frame(width: 22)
-                            VerticalDragProperty(text: "\(Int((layer.opacity * 100).rounded()))%", label: "图层不透明度",
-                                value: .number(layer.opacity, 0...1, pointsPerUnit: 200),
-                                begin: { session.beginLayerPropertyEdit(layer.id) },
-                                change: { session.previewLayerOpacity($0) },
-                                end: { session.endLayerPropertyEdit(commit: $0) })
-                            .frame(width: 28)
-                            if layer.tone?.isEnabled == true {
-                                Image(systemName: "circle.grid.3x3.fill")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.white.opacity(0.65))
-                                    .frame(width: 12, height: 14)
-                                    .accessibilityLabel("已开启网点效果")
-                                    .allowsHitTesting(false)
+                            if layer.kind == .folder {
+                                Button {
+                                    var transaction = Transaction(animation: nil)
+                                    transaction.disablesAnimations = true
+                                    withTransaction(transaction) {
+                                        if !collapsedFolders.insert(layer.id).inserted {
+                                            collapsedFolders.remove(layer.id)
+                                        }
+                                    }
+                                } label: {
+                                    HStack(spacing: 1) {
+                                        Image(systemName: collapsedFolders.contains(layer.id) ? "chevron.right" : "chevron.down")
+                                            .contentTransition(.identity)
+                                            .font(.system(size: 8))
+                                            .frame(width: 8)
+                                            .foregroundStyle(layerDropTarget?.parentID == layer.id ? Color.accentColor : Color.primary)
+                                            .background(layerDropTarget?.parentID == layer.id
+                                                        ? Color.accentColor.opacity(0.22) : .clear)
+                                        Image(systemName: "folder.fill")
+                                            .foregroundStyle(.gray)
+                                            .frame(width: 15, alignment: .leading)
+                                    }
+                                    .frame(width: 24, height: 35)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(ImmediateLayerButtonStyle())
+                                .transaction { transaction in
+                                    transaction.animation = nil
+                                    transaction.disablesAnimations = true
+                                }
+                                .background { LayerRowActionBoundary() }
+                                .accessibilityLabel(collapsedFolders.contains(layer.id) ? "展开文件夹" : "折叠文件夹")
+                            } else {
+                                layerThumbnail(layer)
+                                    .overlay(Rectangle().stroke(
+                                        layer.id == session.selectedLayerID && session.selectedEditTarget == .content
+                                        ? Color.accentColor : .clear, lineWidth: 2))
+                                    .overlay { layerTargetCapture(layer.id, target: .content) }
                             }
                         }
-                        .frame(height: 14)
+                        .frame(height: 28)
+                        if layer.hasMask {
+                            Group {
+                                if let image = session.renderer.maskThumbnail(for: layer.id) {
+                                    Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
+                                } else { Color.white }
+                            }
+                            .frame(width: 24, height: 24)
+                            .background(Color.black.opacity(0.25))
+                            .overlay(Rectangle().stroke(
+                                layer.id == session.selectedLayerID && session.selectedEditTarget == .mask
+                                ? Color.accentColor : Color.white.opacity(0.25), lineWidth:
+                                    layer.id == session.selectedLayerID && session.selectedEditTarget == .mask ? 2 : 1))
+                            .overlay { layerTargetCapture(layer.id, target: .mask) }
+                        }
+                        VStack(alignment: .leading, spacing: 1) {
+                            LayerNameControl(name: layer.name, primary: layer.id == session.selectedLayerID,
+                                rename: { session.renameLayer(layer.id, to: $0) })
+                                .frame(width: textWidth, height: 13, alignment: .leading)
+                                .clipped()
+                            HStack(spacing: 2) {
+                                VerticalDragProperty(text: String(layer.blendMode.title.prefix(2)), label: "混合模式",
+                                    value: .choice(Int(layer.blendMode.shaderIndex), LayerBlendMode.allCases.map(\.title)),
+                                    begin: { session.beginLayerPropertyEdit(layer.id) },
+                                    change: { index in
+                                        session.previewLayerBlendMode(LayerBlendMode.allCases[Int(index)])
+                                    }, end: { session.endLayerPropertyEdit(commit: $0) })
+                                .frame(width: 22)
+                                VerticalDragProperty(text: "\(Int((layer.opacity * 100).rounded()))%", label: "图层不透明度",
+                                    value: .number(layer.opacity, 0...1, pointsPerUnit: 200),
+                                    begin: { session.beginLayerPropertyEdit(layer.id) },
+                                    change: { session.previewLayerOpacity($0) },
+                                    end: { session.endLayerPropertyEdit(commit: $0) })
+                                .frame(width: 28)
+                                if layer.curves?.isEnabled == true {
+                                    Image(systemName: "chart.xyaxis.line").font(.system(size: 9))
+                                        .foregroundStyle(.white.opacity(0.65)).frame(width: 12, height: 14)
+                                        .accessibilityLabel("已开启曲线调整").allowsHitTesting(false)
+                                }
+                                if layer.tone?.isEnabled == true {
+                                    Image(systemName: "circle.grid.3x3.fill")
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(.white.opacity(0.65))
+                                        .frame(width: 12, height: 14)
+                                        .accessibilityLabel("已开启网点效果")
+                                        .allowsHitTesting(false)
+                                }
+                            }
+                            .frame(width: textWidth, height: 14, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .clipped()
+                        }
+                        .frame(width: textWidth, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .clipped()
                     }
-                    .frame(maxWidth: .infinity)
-                }
-                .frame(maxWidth: .infinity)
-                if layer.isLocked {
-                    Button { session.toggleLock(layer.id) } label: {
-                        Image(systemName: "lock.fill")
-                            .foregroundStyle(.secondary)
-                            .frame(width: 19, height: 35)
-                    }
-                    .buttonStyle(ImmediateButtonStyle())
-                    .background { LayerRowActionBoundary() }
-                    .accessibilityLabel("解锁图层")
-                }
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .opacity(session.page.isEffectivelyLocked(layer.id) ? 0.35 : 1)
-                    .frame(width: 19, height: 35)
+                    .frame(width: contentWidth, alignment: .leading)
                     .contentShape(Rectangle())
-                    .highPriorityGesture(layerHandleDrag(layer.id))
-                    .accessibilityLabel("拖动图层")
+                    .clipped()
+                    if layer.isLocked {
+                        Button { session.toggleLock(layer.id) } label: {
+                            Image(systemName: "lock.fill")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 19, height: 35)
+                        }
+                        .buttonStyle(ImmediateButtonStyle())
+                        .background { LayerRowActionBoundary() }
+                        .accessibilityLabel("解锁图层")
+                    }
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .opacity(session.page.isEffectivelyLocked(layer.id) ? 0.35 : 1)
+                        .frame(width: 19, height: 35)
+                        .contentShape(Rectangle())
+                        .highPriorityGesture(layerHandleDrag(layer.id))
+                        .accessibilityLabel("拖动图层")
+                }
+                .padding(.leading, inset)
+                .padding(.trailing, 1)
+                .frame(width: geometry.size.width, height: 35, alignment: .leading)
             }
-            .padding(.leading, CGFloat(1 + entry.depth * 10))
-            .padding(.trailing, 1)
-            .frame(maxWidth: .infinity)
+            .frame(minWidth: 0, maxWidth: .infinity)
             .contentShape(Rectangle())
             .background { layerSelectionCapture(layer.id) }
         }

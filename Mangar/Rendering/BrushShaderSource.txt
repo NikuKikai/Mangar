@@ -173,6 +173,16 @@ fragment float4 selectionOutlineFragment(QuadOutput in [[stage_in]],
     return marchingAntColor(in.position.xy, u.phase);
 }
 
+// Raw R8 coverage, with no threshold. This display never enters exported pixels.
+fragment float4 selectionTintFragment(QuadOutput in [[stage_in]], texture2d<float, access::read> tile [[texture(0)]],
+                                     constant SelectionOutlineUniforms &u [[buffer(0)]]) {
+    int2 pixel = int2(floor(in.canvasPosition));
+    int2 local = pixel - int2(u.tileOrigin);
+    if (any(pixel < 0) || any(float2(pixel) >= u.canvasSize) || any(local < 0) || any(local >= 256)) discard_fragment();
+    float alpha = tile.read(uint2(local)).r;
+    return float4(float3(0.10, 0.45, 1.0) * alpha, alpha);
+}
+
 struct RectOutlineUniforms {
     float4 rect;
     float zoom;
@@ -230,6 +240,18 @@ float4 compositeLayerColor(float4 source, float4 destination, constant LayerComp
                  (1.0 - destination.a) * source.rgb + source.a * destination.a * blended;
     return float4(rgb, source.a + destination.a * (1.0 - source.a));
 }
+float sampleLayerCurve(texture2d<float> curves, float value, uint channel) {
+    constexpr sampler linearSampler(coord::pixel, address::clamp_to_edge, filter::linear);
+    return curves.sample(linearSampler, float2(saturate(value) * 255.0 + 0.5, float(channel) + 0.5)).r;
+}
+float4 applyLayerCurve(float4 source, texture2d<float> curves, uint flags) {
+    if ((flags & 4u) == 0 || source.a <= 0.0) return source;
+    float3 color = saturate(source.rgb / source.a);
+    color = float3(sampleLayerCurve(curves, color.r, 0), sampleLayerCurve(curves, color.g, 0), sampleLayerCurve(curves, color.b, 0));
+    color = float3(sampleLayerCurve(curves, color.r, 1), sampleLayerCurve(curves, color.g, 2), sampleLayerCurve(curves, color.b, 3));
+    return float4(color * source.a, source.a);
+}
+
 float4 applyLayerTone(float4 source, float2 screen, constant LayerCompositeUniforms &u) {
     if (u.tone.w < 0.5) return source;
     float2 delta = screen - u.canvasMap.zw;
@@ -259,10 +281,12 @@ float4 applyLayerTone(float4 source, float2 screen, constant LayerCompositeUnifo
 fragment LayerCompositeOutput layerCompositeFragment(
     QuadOutput in [[stage_in]], texture2d<float> tile [[texture(0)]],
     texture2d<float, access::read> layerMask [[texture(2)]],
+    texture2d<float> curves [[texture(3)]],
     constant LayerCompositeUniforms &u [[buffer(0)]],
     float4 destination [[color(0), raster_order_group(0)]]) {
     constexpr sampler samplerNearest(coord::normalized, address::clamp_to_edge, filter::nearest);
     float4 source = u.solid != 0 ? u.solidColor : tile.sample(samplerNearest, in.uv);
+    source = applyLayerCurve(source, curves, u.padding);
     source = applyLayerTone(source, in.position.xy, u);
     if ((u.padding & 1u) != 0) source *= layerMask.read(uint2(in.position.xy)).r;
     if ((u.padding & 2u) != 0) source.rgb = float3(0.10, 0.45, 1.0) * source.a;
@@ -274,9 +298,11 @@ fragment float4 layerCompositeFallbackFragment(
     QuadOutput in [[stage_in]], texture2d<float> tile [[texture(0)]],
     texture2d<float> backdrop [[texture(1)]],
     texture2d<float, access::read> layerMask [[texture(2)]],
+    texture2d<float> curves [[texture(3)]],
     constant LayerCompositeUniforms &u [[buffer(0)]]) {
     constexpr sampler samplerNearest(coord::normalized, address::clamp_to_edge, filter::nearest);
     float4 source = u.solid != 0 ? u.solidColor : tile.sample(samplerNearest, in.uv);
+    source = applyLayerCurve(source, curves, u.padding);
     source = applyLayerTone(source, in.position.xy, u);
     if ((u.padding & 1u) != 0) source *= layerMask.read(uint2(in.position.xy)).r;
     if ((u.padding & 2u) != 0) source.rgb = float3(0.10, 0.45, 1.0) * source.a;

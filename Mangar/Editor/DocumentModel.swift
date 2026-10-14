@@ -77,6 +77,7 @@ struct LayerRecord: Codable, Identifiable, Equatable {
     var opacity: Double = 1
     var blendMode: LayerBlendMode = .normal
     var tone: LayerToneEffect? = nil
+    var curves: LayerCurveEffect? = nil
     var hasMask: Bool = false
     var isLocked: Bool = false
     var shape: LayerShape? = nil
@@ -84,7 +85,7 @@ struct LayerRecord: Codable, Identifiable, Equatable {
 
 extension LayerRecord {
     private enum CodingKeys: String, CodingKey {
-        case id, name, kind, parentID, isVisible, opacity, blendMode, tone, hasMask, isLocked, shape
+        case id, name, kind, parentID, isVisible, opacity, blendMode, tone, curves, hasMask, isLocked, shape
     }
 
     private enum LegacyKeys: String, CodingKey { case paperBounds }
@@ -102,6 +103,7 @@ extension LayerRecord {
         opacity = try values.decode(Double.self, forKey: .opacity)
         blendMode = try values.decodeIfPresent(LayerBlendMode.self, forKey: .blendMode) ?? .normal
         tone = try values.decodeIfPresent(LayerToneEffect.self, forKey: .tone)
+        curves = try values.decodeIfPresent(LayerCurveEffect.self, forKey: .curves)
         hasMask = try values.decodeIfPresent(Bool.self, forKey: .hasMask) ?? false
         isLocked = try values.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
         shape = try values.decodeIfPresent(LayerShape.self, forKey: .shape)
@@ -286,7 +288,7 @@ extension ProjectManifest {
     }
 }
 
-enum LayerEditTarget: String, Codable {
+nonisolated enum LayerEditTarget: String, Codable {
     case content, mask
     var bytesPerPixel: Int { self == .mask ? 1 : 4 }
     var defaultByte: UInt8 { self == .mask ? 255 : 0 }
@@ -312,7 +314,7 @@ extension TileKey {
 }
 
 enum DrawingTool: String, Codable {
-    case brush, eraser, selection, lassoSelection, lassoFill
+    case brush, eraser, selection, lassoSelection, lassoFill, bucket
 
     var isSelectionTool: Bool { self == .selection || self == .lassoSelection }
     var isRegionTool: Bool { isSelectionTool || self == .lassoFill }
@@ -394,6 +396,7 @@ struct ClearLayerCommand: Codable {
 enum EditCommand: Codable {
     case clearLayer(ClearLayerCommand)
     case lassoFill(LassoFillCommand)
+    case bucketFill(BucketFillCommand)
     case stroke(StrokeCommand)
     case selection(SelectionCommand)
     case addLayer(LayerRecord, Int)

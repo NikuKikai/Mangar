@@ -7743,25 +7743,48 @@
         }
       }
     },
-    "100% 缩放（保持视口中心）" : {
+    "1:1 缩放（保持视口中心）" : {
       "extractionState" : "manual",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "100% 缩放（保持视口中心）"
+            "value" : "1:1 缩放（保持视口中心）"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "100% 表示（ビューポートの中心を維持）"
+            "value" : "1:1 表示（ビューポートの中心を維持）"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "100% zoom (keep viewport center)"
+            "value" : "1:1 zoom (keep viewport center)"
+          }
+        }
+      }
+    },
+    "当前缩放率" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当前缩放率"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "現在の表示倍率"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Current zoom"
           }
         }
       }

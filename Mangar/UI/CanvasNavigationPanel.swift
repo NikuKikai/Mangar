@@ -11,9 +11,12 @@ struct CanvasNavigationPanel: View {
             HStack(spacing:4) {
                 Text(L10n.text("导航")).font(.system(size:11,weight:.semibold))
                 Spacer(minLength:0)
-                Button { session.renderer.setNativeZoom() } label: { Text(verbatim:"100%").font(.system(size:10,design:.monospaced)).frame(width:36,height:24) }
-                    .help(L10n.text("100% 缩放（保持视口中心）"))
-                    .accessibilityLabel(L10n.text("100% 缩放（保持视口中心）"))
+                Text(verbatim:session.renderer.viewportZoomPercentage.formatted(.number.grouping(.never).precision(.fractionLength(0...1)))+"%")
+                    .font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)
+                    .accessibilityLabel(L10n.text("当前缩放率"))
+                Button { session.renderer.setNativeZoom() } label: { Text(verbatim:"1:1").font(.system(size:10,design:.monospaced)).frame(width:22,height:24) }
+                    .help(L10n.text("1:1 缩放（保持视口中心）"))
+                    .accessibilityLabel(L10n.text("1:1 缩放（保持视口中心）"))
                 Button { session.renderer.straightenViewport() } label: { Image(systemName:"rotate.left").frame(width:22,height:24) }
                     .help(L10n.text("画布回正（保持缩放与视口中心）"))
                     .accessibilityLabel(L10n.text("画布回正，保持缩放与视口中心"))

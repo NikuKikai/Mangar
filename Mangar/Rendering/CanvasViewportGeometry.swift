@@ -3,6 +3,11 @@ import CoreGraphics
 
 /// All coordinates here are logical view points and Double-precision world pixels.
 nonisolated struct CanvasViewportGeometry: Equatable {
+    static let minimumDisplayZoom: CGFloat = 0.01
+    static func clampedViewportZoom(_ value: CGFloat, displayScale: CGFloat) -> CGFloat {
+        let minimum = minimumDisplayZoom / max(displayScale,1)
+        return value.isFinite ? max(minimum,value) : minimum
+    }
     var size: CGSize
     var zoom: CGFloat
     var rotation: CGFloat

@@ -130,10 +130,9 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     var viewportTintLayerID: UUID?
     var viewportTintTarget: LayerEditTarget = .content
     var page: PageRecord
-    var minimumViewportZoom: CGFloat {
-        if let finite = page.boundary.finiteRect, finite.width <= 16384, finite.height <= 16384 { return 0.05 }
-        return 1e-7
-    }
+    private var displayPixelScale: CGFloat { max(view?.contentScaleFactor ?? 1,1) }
+    var minimumViewportZoom: CGFloat { CanvasViewportGeometry.minimumDisplayZoom/displayPixelScale }
+    var viewportZoomPercentage: Double { Double(zoom*displayPixelScale*100) }
     var onViewportChanged: (() -> Void)?
     var onContentChanged: (() -> Void)?
     private var viewportNotificationPending = false
@@ -151,7 +150,13 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             if geometry != self.previousViewport { self.previousViewport = geometry; self.onViewportChanged?() }
         }
     }
-    var zoom: CGFloat = 1 { didSet { scheduleViewportNotification() } }
+    var zoom: CGFloat = 1 {
+        didSet {
+            let clamped = CanvasViewportGeometry.clampedViewportZoom(zoom,displayScale:displayPixelScale)
+            if zoom != clamped { zoom = clamped }
+            scheduleViewportNotification()
+        }
+    }
     var rotation: CGFloat = 0 { didSet { scheduleViewportNotification() } }
     var pan: CGPoint = .zero { didSet { scheduleViewportNotification() } }
     private var didFit = false
@@ -1181,7 +1186,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         return CGRect(x:x0,y:y0,width:x1-x0,height:y1-y0)
     }
 
-    /// 100% means one image pixel per physical display pixel, including Retina screens.
+    /// 1:1 means one image pixel per physical display pixel, including Retina screens.
     func setNativeZoom() {
         guard let view,view.bounds.width>0,view.bounds.height>0 else { return }
         let target=viewportGeometry.zoomedAroundCenter(to:1/max(view.contentScaleFactor,1))

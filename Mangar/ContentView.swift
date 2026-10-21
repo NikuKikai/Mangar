@@ -298,6 +298,7 @@ private struct EditorWorkspace: View {
     @State private var showAppMenu = false
     @State private var showExport = false
     @State private var workspaceView: WorkspaceView = .canvas
+    @State private var bookPreview: BookPreviewController?
 
     var body: some View {
         let _ = interfaceLanguage
@@ -377,6 +378,11 @@ private struct EditorWorkspace: View {
             }
         }
         .preferredColorScheme(.dark)
+        .overlay {
+            if let bookPreview {
+                BookPreviewView(controller: bookPreview) { self.bookPreview = nil }
+            }
+        }
         .controlSize(.mini)
         .onChange(of: workspaceView) { _, view in
             session.renderer.setViewportVisible(view == .canvas)
@@ -519,6 +525,14 @@ private struct EditorWorkspace: View {
                 Rectangle().fill(.white.opacity(0.18)).frame(width: 1, height: 18).padding(.horizontal, 3)
             }
             if workspaceView == .pages {
+                if DocumentPreviewForm.resolve(session.manifest) != nil {
+                    Button {
+                        do { bookPreview = try BookPreviewController(source: session.makeBookPreviewSource()) }
+                        catch { session.message = error.localizedDescription }
+                    } label: {
+                        Text(verbatim: "3D").font(.system(size: 11, weight: .semibold)).frame(width: 26, height: 26)
+                    }.help(L10n.text("3D预览"))
+                }
                 Text(L10n.format("%@ 页", "\(session.manifest.logicalPageCount)"))
                     .foregroundStyle(.secondary)
                 if session.manifest.pageStructure == .bookSpreads {

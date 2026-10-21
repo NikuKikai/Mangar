@@ -48,6 +48,14 @@ final class EditorSession: ObservableObject {
 
     let renderer: MetalCanvasRenderer
     private let store: ProjectStore
+
+    func makeBookPreviewSource() throws -> BookPreviewSource {
+        endStroke()
+        endLayerPropertyEdit()
+        releaseModifiers()
+        return BookPreviewSource(manifest: manifest, currentPage: page,
+            currentArchive: try renderer.checkpointArchive(), store: store)
+    }
     private var history: CommandHistory
     private let inkClock = ContinuousInkClock()
     private var strokeStartTime: TimeInterval = 0

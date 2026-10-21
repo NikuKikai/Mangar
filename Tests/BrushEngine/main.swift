@@ -11,6 +11,7 @@ struct BrushEngineChecks {
         BundledBrushTips.resourceDirectory = root.appendingPathComponent("Mangar/Brushes/Presets/Assets")
         let device = MTLCreateSystemDefaultDevice()!
         let queue = device.makeCommandQueue()!
+        try BookPreviewChecks.run(device: device, queue: queue)
         var source = try String(contentsOf: root.appendingPathComponent("Mangar/Rendering/BrushShaderSource.txt"), encoding: .utf8) + "\n" +
             String(contentsOf: root.appendingPathComponent("Mangar/Brushes/GPU/PigmentMixing.txt"), encoding: .utf8) + "\n" +
             String(contentsOf: root.appendingPathComponent("Mangar/Brushes/GPU/BrushKernels.txt"), encoding: .utf8)

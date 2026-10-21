@@ -1664,6 +1664,35 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         return png
     }
 
+    /// Trimmed paper texture for document previews; independent of editing overlays.
+    func bookPreviewTexture(maxDimension: Double = 1280) throws -> MTLTexture {
+        let bounds = page.contentRect
+        let scale = min(maxDimension / bounds.width, maxDimension / bounds.height, 1)
+        let width = max(1, Int((bounds.width * scale).rounded()))
+        let height = max(1, Int((bounds.height * scale).rounded()))
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+            width: width, height: height, mipmapped: true)
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .private
+        guard let texture = device.makeTexture(descriptor: descriptor),
+              let command = queue.makeCommandBuffer() else { throw RendererError.exportFailed }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 1, 1, 1)
+        render(pass: pass, commandBuffer: command, viewport: CGSize(width: width, height: height),
+               zoom: Float(scale), rotation: 0, includeChecker: false, pan: .zero,
+               origin: SIMD2(bounds.minX, bounds.minY))
+        let blit = command.makeBlitCommandEncoder()
+        blit?.generateMipmaps(for: texture)
+        blit?.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        guard command.status == .completed else { throw RendererError.exportFailed }
+        return texture
+    }
+
     func projectThumbnailPNG() throws -> Data {
         let bounds = outputBounds()
         let scale = min(320.0 / bounds.width, 320.0 / bounds.height, 1)

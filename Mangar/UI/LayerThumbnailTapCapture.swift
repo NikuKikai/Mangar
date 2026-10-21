@@ -25,7 +25,7 @@ struct LayerThumbnailTapCapture: UIViewRepresentable {
     }
 }
 
-final class ModifierThumbnailButton: UIButton {
+final class ModifierThumbnailButton: ImmediateFeedbackButton {
     var modifiers: UIKeyModifierFlags = []
     override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
         modifiers = event?.modifierFlags ?? []

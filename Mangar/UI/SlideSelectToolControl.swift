@@ -132,7 +132,7 @@ final class SlideSelectToolView: UIControl, UIGestureRecognizerDelegate {
         popup.frame = CGRect(x: max(safe.minX, min(anchor.maxX + 4, safe.maxX - width)),
             y: max(safe.minY, min(anchor.midY - 18 - current * 30, safe.maxY - height)), width: width, height: height)
         rows = items.enumerated().map { index, item in
-            let row = UIButton(type: .custom)
+            let row = ImmediateFeedbackButton(type: .custom)
             row.tag = index
             row.frame = CGRect(x: 3, y: 3 + CGFloat(index) * 30, width: width - 6, height: 30)
             let image = UIImageView(image: UIImage(systemName: item.icon,

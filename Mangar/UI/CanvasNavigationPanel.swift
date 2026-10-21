@@ -10,10 +10,19 @@ struct CanvasNavigationPanel: View {
         VStack(spacing:0) {
             HStack(spacing:4) {
                 Text(L10n.text("导航")).font(.system(size:11,weight:.semibold))
-                Spacer(minLength:0)
                 Text(verbatim:session.renderer.viewportZoomPercentage.formatted(.number.grouping(.never).precision(.fractionLength(0...1)))+"%")
                     .font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width:60,alignment:.leading)
                     .accessibilityLabel(L10n.text("当前缩放率"))
+                Spacer(minLength:0)
+                Button { session.showsRulers.toggle() } label: {
+                    Image(systemName:"ruler").frame(width:22,height:24)
+                        .foregroundStyle(session.showsRulers ? Color.accentColor : Color.primary)
+                }
+                .help(L10n.text("显示标尺"))
+                .accessibilityLabel(L10n.text("显示标尺"))
+                .accessibilityAddTraits(session.showsRulers ? [.isSelected] : [])
                 Button { session.renderer.setNativeZoom() } label: { Text(verbatim:"1:1").font(.system(size:10,design:.monospaced)).frame(width:22,height:24) }
                     .help(L10n.text("1:1 缩放（保持视口中心）"))
                     .accessibilityLabel(L10n.text("1:1 缩放（保持视口中心）"))

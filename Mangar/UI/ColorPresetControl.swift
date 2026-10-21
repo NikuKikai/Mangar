@@ -23,6 +23,10 @@ struct ColorPresetControl: UIViewRepresentable {
 }
 
 final class ColorPresetView: UIControl, UIGestureRecognizerDelegate {
+    private let feedback = ImmediatePressFeedbackLayer()
+    override var isHighlighted: Bool {
+        didSet { feedback.update(in: self, pressed: isHighlighted && isEnabled) }
+    }
     private let swatch = UIView()
     private let selectionOutline = UIView()
     private var presets: [AppColor] = []
@@ -59,6 +63,7 @@ final class ColorPresetView: UIControl, UIGestureRecognizerDelegate {
         super.layoutSubviews()
         swatch.frame = CGRect(x: (bounds.width - 25) / 2, y: (bounds.height - 25) / 2, width: 25, height: 25)
         selectionOutline.frame = swatch.frame.insetBy(dx: -2, dy: -2)
+        feedback.update(in: self, pressed: isHighlighted && isEnabled)
     }
     func configure(color: AppColor, selected: Bool, presets: [AppColor], tap: @escaping () -> Void,
                    choose: @escaping (Int) -> Void, store: @escaping (Int) -> Void) {
@@ -79,9 +84,11 @@ final class ColorPresetView: UIControl, UIGestureRecognizerDelegate {
     }
     override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
         dragged = false
+        isHighlighted = true
         return true
     }
     override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+        isHighlighted = bounds.contains(touch.location(in: self))
         if touch.location(in: self).x > bounds.maxX + 4 && !dragged {
             dragged = true
             open()
@@ -90,6 +97,7 @@ final class ColorPresetView: UIControl, UIGestureRecognizerDelegate {
         return true
     }
     override func endTracking(_ touch: UITouch?, with event: UIEvent?) {
+        isHighlighted = false
         if dragged {
             if let touch { updateHover(touch) }
             if let hovered { activate(hovered) }
@@ -99,6 +107,7 @@ final class ColorPresetView: UIControl, UIGestureRecognizerDelegate {
     }
     override func cancelTracking(with event: UIEvent?) {
         super.cancelTracking(with: event)
+        isHighlighted = false
         close()
         dragged = false
     }
@@ -114,7 +123,7 @@ final class ColorPresetView: UIControl, UIGestureRecognizerDelegate {
         let safe = window.bounds.inset(by: window.safeAreaInsets).insetBy(dx: 4, dy: 4)
         panel.frame = CGRect(x: min(anchor.maxX + 3, safe.maxX - width),
             y: max(safe.minY, min(anchor.minY, safe.maxY - height)), width: width, height: height)
-        let save = UIButton(type: .custom)
+        let save = ImmediateFeedbackButton(type: .custom)
         save.setImage(UIImage(systemName: "square.and.arrow.down", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13)), for: .normal)
         save.tintColor = .white
         save.frame = CGRect(x: 4, y: 2, width: 28, height: 26)
@@ -126,7 +135,7 @@ final class ColorPresetView: UIControl, UIGestureRecognizerDelegate {
         divider.backgroundColor = UIColor.white.withAlphaComponent(0.18)
         panel.addSubview(divider)
         cells = (0..<16).map { index in
-            let cell = UIButton(type: .custom)
+            let cell = ImmediateFeedbackButton(type: .custom)
             cell.tag = index
             cell.frame = CGRect(x: 4 + (index % 4) * 32, y: 33 + (index / 4) * 32, width: 28, height: 28)
             cell.accessibilityLabel = L10n.format("预设颜色 %@", "\(index + 1)")

@@ -30,6 +30,7 @@ final class CanvasSurface: MTKView {
         didSet {
             if oldValue !== session {
                 historyTap = nil
+                endBrushSizeDrag()
                 hideBrushCursor()
             }
         }
@@ -44,6 +45,8 @@ final class CanvasSurface: MTKView {
     private var pencilTouch: UITouch?
     private var selectionTouch: UITouch?
     private var pickingTouch: UITouch?
+    private var brushSizeTouch: UITouch?
+    private var brushSizeDrag: BrushSizeDrag?
     private var fingerTouches: [UITouch] = []
     private var panStartPoint: CGPoint = .zero
     private var panStartOffset: CGPoint = .zero
@@ -76,6 +79,7 @@ final class CanvasSurface: MTKView {
     override init(frame: CGRect, device: MTLDevice?) {
         super.init(frame: frame, device: device)
         isMultipleTouchEnabled = true
+        clipsToBounds = true
         cursorOutline.fillColor = UIColor.clear.cgColor
         cursorOutline.strokeColor = UIColor.black.cgColor
         cursorOutline.lineWidth = 2
@@ -108,7 +112,7 @@ final class CanvasSurface: MTKView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window == nil { hideBrushCursor() }
+        if window == nil { endBrushSizeDrag(); hideBrushCursor() }
     }
 
     @objc private func pencilHover(_ gesture: UIHoverGestureRecognizer) {
@@ -122,7 +126,10 @@ final class CanvasSurface: MTKView {
     }
 
     @objc private func hideBrushCursor() {
-        if UIApplication.shared.applicationState != .active { historyTap = nil }
+        if UIApplication.shared.applicationState != .active {
+            historyTap = nil
+            endBrushSizeDrag()
+        }
         hoverPoint = nil
         contactPoint = nil
         refreshBrushCursor()
@@ -131,17 +138,22 @@ final class CanvasSurface: MTKView {
     /// Core Animation composites the cursor above Metal; it never enters page pixels.
     func refreshBrushCursor() {
         let position = contactPoint ?? hoverPoint
+        let resizing = brushSizeTouch != nil
         let radius: CGFloat
         if let session, let position,
            !session.selectedTool.isRegionTool, session.selectedTool != .bucket,
-           !session.activeModifiers.contains(.option), pickingTouch == nil,
-           bounds.contains(position),
-           session.renderer.isInsideCanvas(session.renderer.canvasPoint(from: position)) {
-            let pressure = contactPoint != nil ? session.mappedPressure(contactPressure) : 1
-            let fallback = CGFloat(session.brush.radius(pressure: pressure,
-                altitude: contactPoint != nil ? Double(contactAltitude) : .pi / 2))
-            let tipRadius = contactPoint != nil ? (session.renderer.previewTipRadius ?? fallback) : fallback
-            radius = tipRadius * session.renderer.zoom
+           (!session.activeModifiers.contains(.option) || resizing), pickingTouch == nil,
+           (resizing || bounds.contains(position)),
+           (resizing || session.renderer.isInsideCanvas(session.renderer.canvasPoint(from: position))) {
+            if resizing {
+                radius = CGFloat(session.brush.size) * session.renderer.zoom / 2
+            } else {
+                let pressure = contactPoint != nil ? session.mappedPressure(contactPressure) : 1
+                let fallback = CGFloat(session.brush.radius(pressure: pressure,
+                    altitude: contactPoint != nil ? Double(contactAltitude) : .pi / 2))
+                let tipRadius = contactPoint != nil ? (session.renderer.previewTipRadius ?? fallback) : fallback
+                radius = tipRadius * session.renderer.zoom
+            }
         } else {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -166,7 +178,7 @@ final class CanvasSurface: MTKView {
 
     private func updateContactCursor(_ touch: UITouch) {
         hoverPoint = nil
-        contactPoint = touch.preciseLocation(in: self)
+        contactPoint = brushSizeDrag?.center ?? touch.preciseLocation(in: self)
         contactPressure = pressure(for: touch)
         contactAltitude = touch.altitudeAngle
         refreshBrushCursor()
@@ -176,10 +188,24 @@ final class CanvasSurface: MTKView {
         super.touchesBegan(touches, with: event)
         trackHistoryTapBegan(touches)
         guard let session else { return }
+        guard brushSizeTouch == nil else { return }
+        let commandDown = session.activeModifiers.contains(.command)
+            || event?.modifierFlags.contains(.command) == true
         let optionDown = session.activeModifiers.contains(.option)
             || event?.modifierFlags.contains(.alternate) == true
         let shiftDown = session.activeModifiers.contains(.shift)
             || event?.modifierFlags.contains(.shift) == true
+        if commandDown && optionDown,
+           (session.selectedTool == .brush || session.selectedTool == .eraser),
+           selectionTouch == nil, pickingTouch == nil, pencilTouch == nil,
+           let pencil = touches.first(where: { $0.type == .pencil }) {
+            brushSizeTouch = pencil
+            brushSizeDrag = BrushSizeDrag(origin: pencil.preciseLocation(in: self), initialSize: session.brush.size, viewportZoom: session.renderer.zoom)
+            fingerTouches.removeAll(); transformStart = nil
+            historyTap?.valid = false
+            updateContactCursor(pencil)
+            return
+        }
         let newFingers = touches.filter { $0.type == .direct }
         if selectionTouch == nil, pickingTouch == nil, pencilTouch == nil,
            newFingers.count >= 2 {
@@ -227,6 +253,10 @@ final class CanvasSurface: MTKView {
         super.touchesMoved(touches, with: event)
         trackHistoryTapMovement(touches)
         guard let session else { return }
+        if let brushSizeTouch {
+            if touches.contains(brushSizeTouch) { updateBrushSize(brushSizeTouch, event: event) }
+            return
+        }
         if let selectionTouch, touches.contains(selectionTouch) {
             let samples = event?.coalescedTouches(for: selectionTouch) ?? [selectionTouch]
             session.updateSelection(along: samples.map {
@@ -263,6 +293,11 @@ final class CanvasSurface: MTKView {
             if historyAction == 2 { session?.undo() }
             if historyAction == 3 { session?.redo() }
         }
+        if let brushSizeTouch, touches.contains(brushSizeTouch) {
+            updateBrushSize(brushSizeTouch, event: event)
+            endBrushSizeDrag()
+            return
+        }
         if let selectionTouch, touches.contains(selectionTouch) {
             if let session {
                 session.endSelection(at: session.renderer.canvasPoint(
@@ -296,6 +331,10 @@ final class CanvasSurface: MTKView {
         super.touchesCancelled(touches, with: event)
         historyTap?.valid = false
         _ = finishHistoryTapTouches(touches)
+        if let brushSizeTouch, touches.contains(brushSizeTouch) {
+            endBrushSizeDrag()
+            return
+        }
         if let selectionTouch, touches.contains(selectionTouch) {
             session?.cancelSelection()
             self.selectionTouch = nil
@@ -313,13 +352,31 @@ final class CanvasSurface: MTKView {
         removeEndedFingers(touches)
     }
 
+    private func updateBrushSize(_ touch: UITouch, event: UIEvent?) {
+        guard let session, let drag = brushSizeDrag else { return }
+        let command = session.activeModifiers.contains(.command) || event?.modifierFlags.contains(.command) == true
+        let option = session.activeModifiers.contains(.option) || event?.modifierFlags.contains(.alternate) == true
+        if command && option {
+            let size = drag.size(at: touch.preciseLocation(in: self))
+            session.brush.size = size
+        }
+        updateContactCursor(touch)
+    }
+
+    private func endBrushSizeDrag() {
+        guard brushSizeTouch != nil else { return }
+        brushSizeTouch = nil; brushSizeDrag = nil; contactPoint = nil
+        session?.flushBrushResource()
+        refreshBrushCursor()
+    }
+
     private func trackHistoryTapBegan(_ touches: Set<UITouch>) {
         if touches.contains(where: { $0.type == .pencil }) { historyTap?.valid = false }
         let fingers = touches.filter { $0.type == .direct }
         guard !fingers.isEmpty, let renderer = session?.renderer else { return }
         if historyTap == nil {
             historyTap = HistoryTap(started: fingers.map(\.timestamp).min() ?? 0,
-                valid: pencilTouch == nil && selectionTouch?.type != .pencil && pickingTouch?.type != .pencil
+                valid: pencilTouch == nil && brushSizeTouch == nil && selectionTouch?.type != .pencil && pickingTouch?.type != .pencil
                     && !touches.contains(where: { $0.type == .pencil }),
                 zoom: renderer.zoom, rotation: renderer.rotation, pan: renderer.pan)
         }

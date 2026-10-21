@@ -58,8 +58,9 @@ struct ProjectManagerView: View {
         return layout
     }
 
-    private let columns = [GridItem(.adaptive(minimum: 210, maximum: 250), spacing: 18,
-                                    alignment: .top)]
+    private let columns = [GridItem(.adaptive(minimum: ProjectCardMetrics.minimumWidth,
+                                              maximum: ProjectCardMetrics.maximumWidth),
+                                    spacing: ProjectCardMetrics.spacing, alignment: .top)]
 
     var body: some View {
         let _ = interfaceLanguage
@@ -115,6 +116,7 @@ struct ProjectManagerView: View {
             if showingAppMenu {
                 ZStack(alignment: .topTrailing) {
                     Button { showingAppMenu = false } label: { Color.clear.contentShape(Rectangle()) }
+                        .buttonStyle(ImmediateButtonStyle(showsPressFeedback: false))
                         .accessibilityLabel(L10n.text("关闭应用菜单"))
                     VStack(spacing: 0) {
                         if let close {
@@ -192,19 +194,17 @@ struct ProjectManagerView: View {
 
     private var projectGrid: some View {
         ScrollView {
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: ProjectCardMetrics.spacing) {
                 Button { creating = true } label: {
-                    VStack(spacing: 12) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 38, weight: .ultraLight))
-                        Text(L10n.text("新建项目"))
-                            .font(.system(size: 15, weight: .medium))
+                    ProjectGridCard(appearance: .create) {
+                        VStack(spacing: 12) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 38, weight: .ultraLight))
+                            Text(L10n.text("新建项目"))
+                                .font(.system(size: 15, weight: .medium))
+                        }
+                        .foregroundStyle(.primary)
                     }
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 188)
-                    .background(Color.white.opacity(0.055))
-                    .overlay(Rectangle().strokeBorder(.white.opacity(0.2), style: StrokeStyle(lineWidth: 1, dash: [5])))
                 }
                 .buttonStyle(ImmediateButtonStyle())
                 if let current = currentProject {
@@ -214,12 +214,12 @@ struct ProjectManagerView: View {
                     projectCard(project, current: false)
                 }
             }
-            .padding(28)
+            .padding(ProjectCardMetrics.gridPadding)
         }
     }
 
     private func projectCard(_ project: ProjectSummary, current: Bool) -> some View {
-        Group {
+        ProjectGridCard(appearance: .project(isCurrent: current)) {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack {
                     Color(red: 0.21, green: 0.22, blue: 0.23)
@@ -235,7 +235,7 @@ struct ProjectManagerView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                .frame(height: 140)
+                .frame(height: ProjectCardMetrics.previewHeight)
                 .clipped()
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 5) {
@@ -259,11 +259,10 @@ struct ProjectManagerView: View {
                             .fixedSize()
                     }
                 }
-                .padding(9)
+                .padding(ProjectCardMetrics.detailsPadding)
+                .frame(height: ProjectCardMetrics.detailsHeight)
+                .clipped()
             }
-            .frame(maxWidth: .infinity)
-            .background(Color(red: 0.18, green: 0.19, blue: 0.20))
-            .overlay(Rectangle().stroke(current ? Color.accentColor : .white.opacity(0.1), lineWidth: 1))
         }
         .overlay {
             ProjectCardInteraction(name: project.name, open: {
@@ -557,6 +556,32 @@ struct ProjectCardInteraction: UIViewRepresentable {
 }
 
 final class ProjectCardHitView: UIView {
+    private let feedback = ImmediatePressFeedbackLayer()
+    private var pressed = false
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        feedback.update(in: self, pressed: pressed)
+    }
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesBegan(touches, with: event)
+        pressed = true
+        feedback.update(in: self, pressed: pressed)
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesMoved(touches, with: event)
+        pressed = touches.first.map { bounds.contains($0.location(in: self)) } ?? false
+        feedback.update(in: self, pressed: pressed)
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesEnded(touches, with: event)
+        pressed = false
+        feedback.update(in: self, pressed: false)
+    }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesCancelled(touches, with: event)
+        pressed = false
+        feedback.update(in: self, pressed: false)
+    }
     var onOpen: (() -> Void)?
     override func accessibilityActivate() -> Bool {
         onOpen?()

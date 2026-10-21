@@ -307,6 +307,7 @@ private struct EditorWorkspace: View {
             Rectangle().fill(Color.black.opacity(0.45)).frame(height: 1)
             HStack(spacing: 0) {
                 toolRail
+                    .padding(.bottom, workspaceView == .canvas ? ModifierPanelMetrics.size : 0)
                     .disabled(workspaceView == .pages)
                     .frame(width: 40)
                     .background(Color(red: 0.15, green: 0.16, blue: 0.17))
@@ -333,6 +334,20 @@ private struct EditorWorkspace: View {
                     .disabled(workspaceView == .pages)
                     .frame(width: 224)
                     .background(Color(red: 0.15, green: 0.16, blue: 0.17))
+            }
+            .overlay(alignment: .bottomLeading) {
+                if workspaceView == .canvas {
+                    ModifierKeysPanel(active: session.activeModifiers) { modifier, pressed in
+                        session.setModifier(modifier, pressed: pressed)
+                    }
+                    .frame(width: ModifierPanelMetrics.size, height: ModifierPanelMetrics.size)
+                    .overlay(alignment: .topTrailing) {
+                        if !session.activeModifiers.isEmpty {
+                            ModifierKeysIndicator(active: session.activeModifiers)
+                                .offset(y: -ModifierPanelMetrics.indicatorHeight - ModifierPanelMetrics.indicatorGap)
+                        }
+                    }
+                }
             }
         }
         .ignoresSafeArea(edges: .bottom)
@@ -362,7 +377,7 @@ private struct EditorWorkspace: View {
                     Button { showAppMenu = false } label: {
                         Color.clear.contentShape(Rectangle())
                     }
-                    .buttonStyle(ImmediateButtonStyle())
+                    .buttonStyle(ImmediateButtonStyle(showsPressFeedback: false))
                     .keyboardShortcut(.cancelAction)
                     .accessibilityLabel(L10n.text("关闭应用菜单"))
                     appMenu
@@ -434,6 +449,29 @@ private struct EditorWorkspace: View {
             }
             .help(L10n.text("应用菜单"))
             .accessibilityLabel(L10n.text("应用菜单"))
+            HStack(spacing: 1) {
+                ForEach(WorkspaceView.allCases, id: \.self) { view in
+                    Button {
+                        guard view != workspaceView else { return }
+                        session.endStroke()
+                        session.releaseModifiers()
+                        showAppMenu = false
+                        if view == .pages { session.refreshCurrentPageThumbnail() }
+                        workspaceView = view
+                    } label: {
+                        Image(systemName: view.icon)
+                            .frame(width: 27, height: 25)
+                            .background(workspaceView == view ? Color.white.opacity(0.14) : .clear)
+                            .contentShape(Rectangle())
+                    }
+                    .help(view.title)
+                    .accessibilityLabel(view.title)
+                    .accessibilityAddTraits(workspaceView == view ? [.isSelected] : [])
+                }
+            }
+            .overlay(Rectangle().stroke(.white.opacity(0.16), lineWidth: 1))
+            Rectangle().fill(.white.opacity(0.18))
+                .frame(width: 1, height: 18).padding(.horizontal, 3)
             Button { session.saveNow() } label: {
                 Image(systemName: "square.and.arrow.down")
                     .frame(width: 22, height: 24)
@@ -470,38 +508,6 @@ private struct EditorWorkspace: View {
                 .disabled(!session.canClearSelectedTarget)
                 .help(session.selectedEditTarget == .mask ? L10n.text("清空蒙版（有选区时仅作用于选区）") : L10n.text("清空图层（有选区时仅作用于选区）"))
                 .accessibilityLabel(L10n.text("清空当前编辑目标"))
-            }
-            Rectangle().fill(.white.opacity(0.18))
-                .frame(width: 1, height: 18).padding(.horizontal, 3)
-            HStack(spacing: 1) {
-                ForEach(WorkspaceView.allCases, id: \.self) { view in
-                    Button {
-                        guard view != workspaceView else { return }
-                        session.endStroke()
-                        session.releaseModifiers()
-                        showAppMenu = false
-                        if view == .pages { session.refreshCurrentPageThumbnail() }
-                        workspaceView = view
-                    } label: {
-                        Image(systemName: view.icon)
-                            .frame(width: 27, height: 25)
-                            .background(workspaceView == view ? Color.white.opacity(0.14) : .clear)
-                            .contentShape(Rectangle())
-                    }
-                    .help(view.title)
-                    .accessibilityLabel(view.title)
-                    .accessibilityAddTraits(workspaceView == view ? [.isSelected] : [])
-                }
-            }
-            .overlay(Rectangle().stroke(.white.opacity(0.16), lineWidth: 1))
-            if workspaceView == .canvas {
-                Button { session.showsRulers.toggle() } label: {
-                    Image(systemName:"ruler").frame(width:22,height:24)
-                        .foregroundStyle(session.showsRulers ? Color.accentColor : Color.primary)
-                }
-                .help(L10n.text("显示标尺"))
-                .accessibilityLabel(L10n.text("显示标尺"))
-                .accessibilityAddTraits(session.showsRulers ? [.isSelected] : [])
             }
             Spacer(minLength: 8)
             if workspaceView == .canvas, session.hasSelection {
@@ -744,20 +750,9 @@ private struct EditorWorkspace: View {
             .help(L10n.text("透明色"))
             .accessibilityLabel(L10n.text("透明色"))
             .accessibilityAddTraits(session.usesTransparentColor ? .isSelected : [])
-            Rectangle().fill(Color.gray.opacity(0.5))
-                .frame(width: 28, height: 1)
-                .padding(.vertical, 3)
-            ForEach(EditorModifier.allCases, id: \.self) { modifier in
-                ModifierKeyButton(modifier: modifier,
-                                  isPressed: session.activeModifiers.contains(modifier)) { pressed in
-                    session.setModifier(modifier, pressed: pressed)
-                }
-                .frame(width: 34, height: 34)
-                .help(L10n.format("按住 %@，松开即释放", "\(modifier.name)"))
-            }
         }
         .padding(.top, 4)
-        .padding(.bottom, 4)
+        .padding(.bottom, 12)
     }
 
     private func activateSelectionTool(_ tool: DrawingTool) {
@@ -988,7 +983,7 @@ private struct EditorWorkspace: View {
                                      ? (highlighted.contains(layer.id) ? Color.accentColor : Color.primary) : Color.gray.opacity(0.55))
                     .frame(width: 25, height: 35)
             }
-            .buttonStyle(ImmediateLayerButtonStyle())
+            .buttonStyle(ImmediateButtonStyle())
             .transaction { transaction in
                 transaction.animation = nil
                 transaction.disablesAnimations = true
@@ -1027,7 +1022,7 @@ private struct EditorWorkspace: View {
                                     .frame(width: 24, height: 35)
                                     .contentShape(Rectangle())
                                 }
-                                .buttonStyle(ImmediateLayerButtonStyle())
+                                .buttonStyle(ImmediateButtonStyle())
                                 .transaction { transaction in
                                     transaction.animation = nil
                                     transaction.disablesAnimations = true
@@ -1416,11 +1411,6 @@ private struct LayerRowFrameKey: PreferenceKey {
     }
 }
 
-/// Layer controls update immediately, without pressed fades or symbol transitions.
-private struct ImmediateLayerButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View { configuration.label }
-}
-
 private struct ThumbnailChecker: View {
     var body: some View {
         Canvas(opaque: true) { context, size in
@@ -1596,45 +1586,6 @@ private struct FloatingPanelOverlay: UIViewRepresentable {
             view.dynamicsHost = nil
         }
         view.setNeedsLayout()
-    }
-}
-
-private struct ModifierKeyButton: UIViewRepresentable {
-    @AppStorage(AppLanguage.preferenceKey) private var interfaceLanguage = AppLanguage.system.rawValue
-    let modifier: EditorModifier
-    let isPressed: Bool
-    let onPressChange: (Bool) -> Void
-
-    func makeUIView(context: Context) -> UIButton {
-        let button = UIButton(type: .custom)
-        button.setTitle(modifier.symbol, for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 19, weight: .medium)
-        button.layer.cornerRadius = 3
-        button.accessibilityLabel = modifier.name
-        button.addTarget(context.coordinator, action: #selector(Coordinator.pressKey), for: [.touchDown, .touchDragEnter])
-        button.addTarget(context.coordinator, action: #selector(Coordinator.releaseKey),
-                         for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
-        return button
-    }
-
-    func updateUIView(_ button: UIButton, context: Context) {
-        let _ = interfaceLanguage
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        defer { CATransaction.commit() }
-        context.coordinator.onPressChange = onPressChange
-        button.backgroundColor = isPressed ? UIColor.systemBlue.withAlphaComponent(0.7) : .clear
-        button.setTitleColor(.white, for: .normal)
-        button.accessibilityTraits = isPressed ? [.button, .selected] : [.button]
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(onPressChange: onPressChange) }
-
-    final class Coordinator: NSObject {
-        var onPressChange: (Bool) -> Void
-        init(onPressChange: @escaping (Bool) -> Void) { self.onPressChange = onPressChange }
-        @objc func pressKey() { onPressChange(true) }
-        @objc func releaseKey() { onPressChange(false) }
     }
 }
 

@@ -7,6 +7,43 @@ import UniformTypeIdentifiers
 @main
 struct BrushEngineChecks {
     @MainActor static func main() async throws {
+        var modifierHolds = ModifierKeyHoldState()
+        _ = modifierHolds.set(.commandOption, pressed: true)
+        _ = modifierHolds.set(.option, pressed: true)
+        let releasedCombo = modifierHolds.set(.commandOption, pressed: false)
+        precondition(releasedCombo.released == [.command] && modifierHolds.modifiers == [.option])
+        _ = modifierHolds.set(.command, pressed: true)
+        _ = modifierHolds.set(.commandOption, pressed: true)
+        _ = modifierHolds.set(.option, pressed: false)
+        precondition(modifierHolds.modifiers == [.command, .option])
+        _ = modifierHolds.set(.commandOption, pressed: false)
+        precondition(modifierHolds.modifiers == [.command])
+        precondition(modifierHolds.releaseAll() == [.command] && modifierHolds.modifiers.isEmpty)
+        precondition(ModifierPanelKey.allCases == [.command, .shift, .commandOption, .option])
+        print("PASS Modifier panel order and overlapping compound holds release only unheld modifiers")
+        let grabPoint = CGPoint(x: 100,y: 50)
+        for zoom: CGFloat in [0.25, 1, 4] {
+            for initialSize: Double in [40, 200, 800] {
+                let drag = BrushSizeDrag(origin: grabPoint, initialSize: initialSize, viewportZoom: zoom)
+                let initialRadius = CGFloat(initialSize)*zoom/2
+                precondition(abs(drag.size(at: grabPoint)-initialSize) < 0.00001)
+                precondition(abs((grabPoint.x-drag.center.x)-initialRadius/sqrt(2)) < 0.00001)
+                precondition(abs((grabPoint.y-drag.center.y)-initialRadius/sqrt(2)) < 0.00001)
+                for factor: CGFloat in [0.2, 0.5, 1, 2] {
+                    for angle: CGFloat in [0, .pi/4, .pi/2, .pi, -.pi/2] {
+                        let radius = initialRadius*factor
+                        let point = CGPoint(x: drag.center.x+cos(angle)*radius,y: drag.center.y+sin(angle)*radius)
+                        precondition(abs(drag.size(at: point)-initialSize*Double(factor)) < 0.00001)
+                    }
+                }
+                precondition(drag.size(at: drag.center) == 1)
+                precondition(drag.size(at: CGPoint(x: drag.center.x+2000*zoom,y: drag.center.y)) == 2000)
+            }
+        }
+        let edgeDrag = BrushSizeDrag(origin: CGPoint(x: 1,y: 1),initialSize: 400,viewportZoom: 1)
+        precondition(edgeDrag.center.x < 0 && edgeDrag.center.y < 0)
+        precondition(abs(edgeDrag.size(at: CGPoint(x: 1,y: 1))-400) < 0.00001)
+        print("PASS Brush-size drag grabs the lower-right edge, shrinks/grows radially and preserves size around the circle")
         let root = URL(fileURLWithPath: CommandLine.arguments[1])
         BundledBrushTips.resourceDirectory = root.appendingPathComponent("Mangar/Brushes/Presets/Assets")
         let device = MTLCreateSystemDefaultDevice()!

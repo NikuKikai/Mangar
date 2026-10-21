@@ -125,7 +125,7 @@ final class LayerNameView: UIView, UITextFieldDelegate, UIGestureRecognizerDeleg
         popup.layer.shadowRadius = 5
         popup.layer.shadowOffset = CGSize(width: 0, height: 2)
         buttons = presets.enumerated().map { index, text in
-            let button = UIButton(type: .custom)
+            let button = ImmediateFeedbackButton(type: .custom)
             button.setTitle(text, for: .normal)
             button.titleLabel?.font = .systemFont(ofSize: 11)
             button.contentHorizontalAlignment = .leading

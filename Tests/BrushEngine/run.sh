@@ -10,6 +10,6 @@ xcrun swiftc -parse-as-library -swift-version 5 \
   Mangar/Editor/AppToolPreferences.swift Mangar/Rendering/CanvasViewportGeometry.swift Mangar/Rendering/CanvasTileIndex.swift Mangar/Rendering/CanvasTileLOD.swift Mangar/Rendering/PolygonMaskRasterizer.swift Mangar/Rendering/SelectionSnapshot.swift Mangar/Rendering/TileContentTracker.swift \
   Mangar/Brushes/Model/*.swift Mangar/Brushes/Presets/*.swift \
   Mangar/Brushes/Resources/*.swift Mangar/Brushes/GPU/*.swift Mangar/Brushes/Runtime/MetalBrushEngine.swift Mangar/Brushes/Runtime/BrushChangeTracker.swift \
-  Mangar/Preview3D/Model/*.swift Mangar/Preview3D/Rendering/BookSpineMesh.swift Mangar/Preview3D/Rendering/BookShaders.swift Mangar/Preview3D/Rendering/MetalBookRenderer.swift Mangar/Preview3D/Rendering/MetalSphereRenderer.swift Tests/BrushEngine/BookPreviewChecks.swift Tests/BrushEngine/SpherePreviewChecks.swift \
+  Mangar/Preview3D/Model/*.swift Mangar/Preview3D/Rendering/BookSpineMesh.swift Mangar/Preview3D/Rendering/BookShaders.swift Mangar/Preview3D/Rendering/MetalBookRenderer.swift Mangar/Preview3D/Rendering/MetalSphereRenderer.swift Tests/BrushEngine/BookPreviewChecks.swift Tests/BrushEngine/SpherePreviewChecks.swift Tests/BrushEngine/FacingPageChecks.swift \
   Tests/BrushEngine/main.swift -o "$scratch/check"
 "$scratch/check" "$root"

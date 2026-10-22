@@ -87,6 +87,14 @@ struct ProjectStore {
         return (page, tiles)
     }
 
+    /// Metadata only: reference-page placement never decodes painting tiles.
+    func pageRecord(_ id: UUID) throws -> PageRecord {
+        let data = try Data(contentsOf: pageDirectory(id).appendingPathComponent("state.json"))
+        let state = try JSONDecoder().decode(PageState.self, from: data)
+        guard (2...4).contains(state.version) else { throw StoreError.unsupportedVersion }
+        return state.page
+    }
+
     func loadPageIndex(_ id: UUID) throws -> (PageRecord, CanvasTileArchive) {
         let directory = pageDirectory(id)
         let state = try JSONDecoder().decode(PageState.self, from: Data(contentsOf: directory.appendingPathComponent("state.json")))

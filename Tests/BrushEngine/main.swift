@@ -71,6 +71,7 @@ struct BrushEngineChecks {
         """
         let library = try await device.makeLibrary(source: source, options: nil)
         try SpherePreviewChecks.checkGuides(device: device,queue: queue,library: library)
+        try FacingPageChecks.run(device: device,queue: queue,library: library)
         let engine = try MetalBrushEngine(device: device, queue: queue, library: library)
         let layer = UUID()
         func command(_ preset: BrushPresetID, _ samples: [StrokeSample], size: Double = 24) -> StrokeCommand {

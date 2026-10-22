@@ -46,6 +46,37 @@ final class EditorSession: ObservableObject {
     @Published private(set) var needsSave = false
     @Published private(set) var pageThumbnails: [UUID: UIImage] = [:]
 
+    @Published var showsFacingPage = UserDefaults.standard.object(forKey: "MangarShowsFacingPage") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(showsFacingPage,forKey: "MangarShowsFacingPage")
+            renderer.showsFacingPage = showsFacingPage
+        }
+    }
+    @Published var facingPageOpacity = UserDefaults.standard.object(forKey: "MangarFacingPageOpacity") as? Double ?? 1 {
+        didSet {
+            UserDefaults.standard.set(facingPageOpacity,forKey: "MangarFacingPageOpacity")
+            renderer.facingPageOpacity = facingPageOpacity
+        }
+    }
+    var facingPagePair: FacingPagePair? { FacingPagePair.resolve(manifest: manifest,page: page) }
+    private var loadedFacingPair: FacingPagePair?
+
+    func refreshFacingPagePreview() {
+        guard let pair = facingPagePair else {
+            loadedFacingPair = nil; renderer.clearFacingPageImage(); return
+        }
+        guard pair != loadedFacingPair else { return }
+        renderer.clearFacingPageImage()
+        do {
+            let partner = try store.pageRecord(pair.partnerID)
+            loadPageThumbnail(pair.partnerID)
+            guard let image = pageThumbnails[pair.partnerID]?.cgImage else { return }
+            try renderer.setFacingPageImage(ownerID: page.id,
+                rect: pair.destinationRect(current: page,partner: partner),image: image)
+            loadedFacingPair = pair
+        } catch { message = L10n.format("无法读取页面缩略图：%@", "\(error.localizedDescription)") }
+    }
+
     let renderer: MetalCanvasRenderer
     private let store: ProjectStore
 
@@ -83,6 +114,8 @@ final class EditorSession: ObservableObject {
         self.selectedLayerIDs = initialPage.layers.last.map { [$0.id] } ?? []
         self.history = CommandHistory(checkpoint: DocumentCheckpoint(page: initialPage,
                                                                       archive: initialTiles))
+        renderer.showsFacingPage = showsFacingPage
+        renderer.facingPageOpacity = facingPageOpacity
         renderer.onViewportChanged = { [weak self] in self?.viewportRevision += 1 }
         renderer.onContentChanged = { [weak self] in self?.contentRevision += 1 }
         renderer.onStorageError = { [weak self] error in self?.message = error.localizedDescription }
@@ -760,13 +793,7 @@ final class EditorSession: ObservableObject {
             }
             let newPage = PageRecord.blank(name: L10n.text("新页面"), width: width, height: height,
                                             comicLayout: layout, isSpread: isSpread)
-            let scale = min(320.0 / Double(width), 320.0 / Double(height), 1)
-            let size = CGSize(width: max(1, Int((Double(width) * scale).rounded())),
-                              height: max(1, Int((Double(height) * scale).rounded())))
-            let thumbnail = UIGraphicsImageRenderer(size: size).pngData { context in
-                UIColor.white.setFill()
-                context.fill(CGRect(origin: .zero, size: size))
-            }
+            let thumbnail = PageThumbnail.whitePNG(for: CGSize(width: width, height: height))
             var updated = manifest
             try store.insertPage(newPage, at: index, into: &updated, thumbnail: thumbnail)
             manifest = updated

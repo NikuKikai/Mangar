@@ -7,6 +7,11 @@ struct VerticalDragProperty: UIViewRepresentable {
     enum Value {
         case number(Double, ClosedRange<Double>, pointsPerUnit: Double)
         case choice(Int, [String])
+
+        var fraction: Double? {
+            if case .number(let value,let range,_) = self { return ControlValueLevel.fraction(value,in: range) }
+            return nil
+        }
     }
     let text: String
     let label: String
@@ -31,6 +36,9 @@ struct VerticalDragProperty: UIViewRepresentable {
 
 final class VerticalPropertyView: UIView, UIGestureRecognizerDelegate {
     private let title = UILabel()
+    private let valueLevel = ControlValueLevel()
+    private var levelFraction: Double?
+    private var levelEmphasized = false
     private var value: VerticalDragProperty.Value = .number(1, 0...1, pointsPerUnit: 200)
     private var onBegin: (() -> Void)?
     private var onChange: ((Double) -> Void)?
@@ -62,6 +70,11 @@ final class VerticalPropertyView: UIView, UIGestureRecognizerDelegate {
     override func layoutSubviews() {
         super.layoutSubviews()
         title.frame = bounds.insetBy(dx: 2, dy: 0)
+        refreshValueLevel()
+    }
+    private func refreshValueLevel() {
+        valueLevel.update(in: self,fraction: levelFraction,enabled: isUserInteractionEnabled,
+                          emphasized: active || levelEmphasized)
     }
     func configure(text: String, label: String, value: VerticalDragProperty.Value,
                    begin: @escaping () -> Void, change: @escaping (Double) -> Void,
@@ -76,6 +89,9 @@ final class VerticalPropertyView: UIView, UIGestureRecognizerDelegate {
             accessibilityValue = options[index]
         } else { accessibilityValue = text }
         self.value = value
+        levelFraction = value.fraction
+        levelEmphasized = emphasized
+        refreshValueLevel()
         onBegin = begin; onChange = change; onEnd = end
         accessibilityHint = L10n.text("按住并上下拖动以调整，松开确认")
     }
@@ -104,6 +120,8 @@ final class VerticalPropertyView: UIView, UIGestureRecognizerDelegate {
         switch value {
         case .number(_, let range, let pointsPerUnit):
             let next = min(range.upperBound, max(range.lowerBound, initialValue - Double(translation) / pointsPerUnit))
+            levelFraction = ControlValueLevel.fraction(next,in: range)
+            refreshValueLevel()
             onChange?(next)
         case .choice(_, let options):
             let next = min(options.count - 1, max(0, Int(initialValue) + Int((translation / rowHeight).rounded())))
@@ -116,8 +134,12 @@ final class VerticalPropertyView: UIView, UIGestureRecognizerDelegate {
     func finish(commit: Bool) {
         popup?.removeFromSuperview(); popup = nil; rows = []
         backgroundColor = UIColor.white.withAlphaComponent(0.12)
-        guard active else { return }
+        guard active else { refreshValueLevel(); return }
         active = false
+        if !commit, case .number(_,let range,_) = value {
+            levelFraction = ControlValueLevel.fraction(initialValue,in: range)
+        }
+        refreshValueLevel()
         onEnd?(commit)
     }
     private func showChoices(_ options: [String]) {

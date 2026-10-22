@@ -99,6 +99,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private let layerCompositePipeline: MTLRenderPipelineState
     private var groupTargets: [Int: MTLTexture] = [:]
     private let tilePipeline: MTLRenderPipelineState
+    private let facingPagePipeline: MTLRenderPipelineState
     private let shapePipeline: MTLRenderPipelineState
     private let checkerPipeline: MTLRenderPipelineState
     private let selectionTintPipeline: MTLRenderPipelineState
@@ -121,6 +122,20 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private var displayLink: CADisplayLink?
     private var displayLinkTarget: SelectionDisplayLinkTarget?
     private(set) var dirtyBounds: [TileKey: CGRect] = [:]
+    private var facingPageImage: (ownerID: UUID, rect: CGRect, texture: MTLTexture)?
+    var showsFacingPage = true { didSet { view?.setNeedsDisplay() } }
+    var facingPageOpacity: Double = 1 { didSet { view?.setNeedsDisplay() } }
+
+    func setFacingPageImage(ownerID: UUID, rect: CGRect, image: CGImage) throws {
+        let texture = try MTKTextureLoader(device: device).newTexture(cgImage: image, options: [
+            .SRGB: false, .origin: MTKTextureLoader.Origin.topLeft.rawValue,
+            .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue)
+        ])
+        facingPageImage = (ownerID, rect, texture)
+        view?.setNeedsDisplay()
+    }
+    func clearFacingPageImage() { facingPageImage = nil; view?.setNeedsDisplay() }
+
     weak var view: MTKView?
     var showsSelectionTint = false {
         didSet {
@@ -192,6 +207,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
               let selectionDeviation = library.makeFunction(name: "selectionTileDeviationBounds"),
               let vertex = library.makeFunction(name: "tileVertex"),
               let tileFragment = library.makeFunction(name: "tileFragment"),
+              let facingPageFragment = library.makeFunction(name: "facingPageFragment"),
               let layerCompositeFragment = library.makeFunction(name: usesRasterOrderGroups
                 ? "layerCompositeFragment" : "layerCompositeFallbackFragment"),
               let shapeFragment = library.makeFunction(name: "shapeFragment"),
@@ -235,6 +251,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         attachment.sourceAlphaBlendFactor = .one
         attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         self.tilePipeline = try device.makeRenderPipelineState(descriptor: tileDescriptor)
+        tileDescriptor.fragmentFunction = facingPageFragment
+        self.facingPagePipeline = try device.makeRenderPipelineState(descriptor: tileDescriptor)
 
         let compositeDescriptor = MTLRenderPipelineDescriptor()
         compositeDescriptor.vertexFunction = vertex
@@ -1107,6 +1125,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         if inspectingSelection {
             drawSelectionOutline(encoder: encoder, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
             drawPageGuides(encoder: encoder, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
+            drawFacingPage(encoder: encoder, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
             encoder.endEncoding()
             return
         }
@@ -1145,8 +1164,26 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
                            rotation: rotation, pan: pan)
             drawSelectionOutline(encoder: encoder, viewport: vp, zoom: zoom,
                                  rotation: rotation, pan: pan)
+            drawFacingPage(encoder: encoder, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
         }
         encoder.endEncoding()
+    }
+
+    private func drawFacingPage(encoder: MTLRenderCommandEncoder, viewport: SIMD2<Float>,
+                                zoom: Float, rotation: Float, pan: SIMD2<Float>) {
+        guard showsFacingPage, facingPageOpacity > 0,
+              let image = facingPageImage, image.ownerID == page.id, !page.isDoublePage else { return }
+        let rect = image.rect
+        // No current-page clip: the neighbor must extend outside its boundary.
+        var quad = QuadUniforms(origin: SIMD2(Float(rect.minX-renderOrigin.x), Float(rect.minY-renderOrigin.y)),
+            size: SIMD2(Float(rect.width),Float(rect.height)),viewport: viewport,
+            zoom: zoom,rotation: rotation,pan: pan)
+        var opacity = Float(min(1,max(0,facingPageOpacity)))
+        encoder.setRenderPipelineState(facingPagePipeline)
+        encoder.setVertexBytes(&quad,length: MemoryLayout<QuadUniforms>.stride,index: 0)
+        encoder.setFragmentBytes(&opacity,length: MemoryLayout<Float>.stride,index: 0)
+        encoder.setFragmentTexture(image.texture,index: 0)
+        encoder.drawPrimitives(type: .triangle,vertexStart: 0,vertexCount: 6)
     }
 
     private func displayTiles(layerID: UUID, target: LayerEditTarget = .content, zoom: Float, bounds: CGRect? = nil) -> [(CGRect,MTLTexture)] {
@@ -1717,9 +1754,10 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
 
     func projectThumbnailPNG() throws -> Data {
         let bounds = outputBounds()
-        let scale = min(320.0 / bounds.width, 320.0 / bounds.height, 1)
-        let width = max(1, Int((bounds.width * scale).rounded()))
-        let height = max(1, Int((bounds.height * scale).rounded()))
+        let geometry = PageThumbnail.geometry(for: bounds.size)
+        let scale = geometry.scale
+        let width = Int(geometry.pixelSize.width)
+        let height = Int(geometry.pixelSize.height)
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
         descriptor.storageMode = .shared

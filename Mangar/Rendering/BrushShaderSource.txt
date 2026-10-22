@@ -118,6 +118,14 @@ fragment float4 tileFragment(QuadOutput in [[stage_in]],
     return tile.sample(s, in.uv);
 }
 
+// Editor-only neighboring page; unlike painting tiles it is not clipped to
+// the current canvas boundary, and its premultiplied alpha is scaled once.
+fragment float4 facingPageFragment(QuadOutput in [[stage_in]],
+    texture2d<float> image [[texture(0)]], constant float &opacity [[buffer(0)]]) {
+    constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
+    return image.sample(s, in.uv) * opacity;
+}
+
 fragment float4 shapeFragment(QuadOutput in [[stage_in]], constant float4 &color [[buffer(0)]]) {
     if (any(in.canvasPosition < in.bounds.xy) || any(in.canvasPosition >= in.bounds.zw)) discard_fragment();
     return color;

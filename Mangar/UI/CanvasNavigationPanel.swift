@@ -16,6 +16,16 @@ struct CanvasNavigationPanel: View {
                     .frame(width:60,alignment:.leading)
                     .accessibilityLabel(L10n.text("当前缩放率"))
                 Spacer(minLength:0)
+                if session.manifest.purpose == .book {
+                    ScrubbableToggleButton(icon: "rectangle.on.rectangle",label: L10n.text("显示对页缩略图"),
+                        isOn: session.showsFacingPage,value: session.facingPageOpacity) { on,opacity in
+                            if session.showsFacingPage != on { session.showsFacingPage = on }
+                            if session.facingPageOpacity != opacity { session.facingPageOpacity = opacity }
+                        }
+                        .compactIconTarget()
+                        .disabled(session.facingPagePair == nil)
+                        .help(L10n.text("对页缩略图；上下拖动调整不透明度"))
+                }
                 Button { session.showsRulers.toggle() } label: {
                     ControlSymbol(name: "ruler").compactIconTarget()
                         .foregroundStyle(session.showsRulers ? Color.accentColor : Color.primary)
@@ -58,6 +68,7 @@ struct CanvasNavigationPanel: View {
         }
         .buttonStyle(ImmediateButtonStyle())
         .background(Color(red:0.15,green:0.16,blue:0.17))
+        .task(id: session.facingPagePair) { session.refreshFacingPagePreview() }
         .task(id:revision) {
             do {
                 session.renderer.prepareForReadback()

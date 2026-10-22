@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 enum PageStartSide: String, Codable, CaseIterable {
     case right, left
@@ -63,5 +64,35 @@ struct PageContainer: Identifiable, Equatable {
                                             appendIndex: manifest.pageIDs.count))
         }
         return containers
+    }
+}
+
+/// A real single-page partner in the same arranged spread; gaps are not pages.
+struct FacingPagePair: Hashable {
+    var currentID: UUID
+    var partnerID: UUID
+    var partnerIsLeft: Bool
+
+    static func resolve(manifest: ProjectManifest, page: PageRecord) -> Self? {
+        guard manifest.purpose == .book, manifest.pageStructure == .bookSpreads, !page.isDoublePage else { return nil }
+        for container in PageContainer.arrange(manifest) where container.spreadID == nil {
+            guard case .page(let right, _) = container.right,
+                  case .page(let left, _) = container.left else { continue }
+            if right == page.id { return Self(currentID: right, partnerID: left, partnerIsLeft: true) }
+            if left == page.id { return Self(currentID: left, partnerID: right, partnerIsLeft: false) }
+        }
+        return nil
+    }
+
+    /// The trim edges meet; each page's surrounding canvas margins overlap.
+    func destinationRect(current: PageRecord, partner: PageRecord) -> CGRect {
+        let scale: CGFloat
+        if let a = current.comicLayout, let b = partner.comicLayout, a.dpi > 0, b.dpi > 0 {
+            scale = CGFloat(a.dpi) / CGFloat(b.dpi)
+        } else { scale = 1 }
+        let a = current.contentRect, b = partner.contentRect
+        let x = partnerIsLeft ? a.minX - b.maxX * scale : a.maxX - b.minX * scale
+        return CGRect(x: x, y: a.minY - b.minY * scale,
+                      width: CGFloat(partner.width) * scale, height: CGFloat(partner.height) * scale)
     }
 }

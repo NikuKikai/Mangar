@@ -64,13 +64,7 @@ struct ProjectLibrary {
         var manifest = ProjectManifest(name: name, pageIDs: [first.id], selectedPageID: first.id,
                                        startingSide: startingSide, singlePageLayout: layout, purpose: request.purpose,
                                        pageStructure: request.purpose == .book ? .bookSpreads : .cards, initialBoundary: request.boundary)
-        let scale = min(320.0 / Double(width), 320.0 / Double(height), 1)
-        let thumbnailSize = CGSize(width: max(1, Int((Double(width) * scale).rounded())),
-                                   height: max(1, Int((Double(height) * scale).rounded())))
-        let thumbnail = UIGraphicsImageRenderer(size: thumbnailSize).pngData { context in
-            UIColor.white.setFill()
-            context.fill(CGRect(origin: .zero, size: thumbnailSize))
-        }
+        let thumbnail = PageThumbnail.whitePNG(for: CGSize(width: width, height: height))
         do {
             try store.save(manifest: manifest, page: first, changedTiles: [:],
                            allTileKeys: [], thumbnail: thumbnail)

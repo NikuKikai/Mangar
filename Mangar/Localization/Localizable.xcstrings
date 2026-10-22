@@ -8206,6 +8206,50 @@
           }
         }
       }
+    },
+    "显示对页缩略图" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示对页缩略图"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show facing page"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "見開きの相手ページを表示"
+          }
+        }
+      }
+    },
+    "对页缩略图；上下拖动调整不透明度" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "对页缩略图；上下拖动调整不透明度"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Facing page; drag vertically to adjust opacity"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相手ページ：上下にドラッグして不透明度を調整"
+          }
+        }
+      }
     }
   },
   "version" : "1.0"

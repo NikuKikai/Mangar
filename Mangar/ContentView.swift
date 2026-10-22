@@ -66,17 +66,17 @@ private struct ExportSettingsView: View {
         VStack(spacing: 0) {
             HStack {
                 Text(L10n.text("导出 PNG"))
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Button(action: close) {
                     Image(systemName: "xmark")
-                        .frame(width: 30, height: 30)
+                        .compactIconTarget()
                 }
                 .help(L10n.text("关闭导出画面"))
                 .accessibilityLabel(L10n.text("关闭导出画面"))
             }
-            .padding(.horizontal, 18)
-            .frame(height: 48)
+            .padding(.horizontal, 4)
+            .frame(height: CompactControlMetrics.toolbarHeight)
             .background(Color(red: 0.16, green: 0.17, blue: 0.18))
             HStack(spacing: 22) {
                 ZStack {
@@ -385,7 +385,7 @@ private struct EditorWorkspace: View {
                     appMenu
                         .contentShape(Rectangle())
                         .onTapGesture { }
-                        .offset(x: 33, y: 35)
+                        .offset(x: 33, y: CompactControlMetrics.toolbarHeight + 1)
                 }
             }
         }
@@ -455,14 +455,14 @@ private struct EditorWorkspace: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: CompactControlMetrics.buttonSpacing) {
             Button {
                 showAppMenu = false
                 showProjects()
             } label: {
                 MangarLogoMark()
                     .frame(width: 22, height: 22)
-                    .frame(width: 25, height: 24)
+                    .compactIconTarget()
             }
             .help(L10n.text("项目管理"))
             .accessibilityLabel(L10n.text("项目管理"))
@@ -470,12 +470,12 @@ private struct EditorWorkspace: View {
                 showPageModeMenu = false
                 showAppMenu.toggle()
             } label: {
-                Image(systemName: "line.3.horizontal")
-                    .frame(width: 22, height: 24)
+                ControlSymbol(name: "line.3.horizontal")
+                    .compactIconTarget()
             }
             .help(L10n.text("应用菜单"))
             .accessibilityLabel(L10n.text("应用菜单"))
-            HStack(spacing: 1) {
+            HStack(spacing: 0) {
                 ForEach(WorkspaceView.allCases, id: \.self) { view in
                     Button {
                         guard view != workspaceView else { return }
@@ -485,8 +485,8 @@ private struct EditorWorkspace: View {
                         if view == .pages { session.refreshCurrentPageThumbnail() }
                         workspaceView = view
                     } label: {
-                        Image(systemName: view.icon)
-                            .frame(width: 27, height: 25)
+                        ControlSymbol(name: view.icon)
+                            .compactIconTarget()
                             .background(workspaceView == view ? Color.white.opacity(0.14) : .clear)
                             .contentShape(Rectangle())
                     }
@@ -499,8 +499,8 @@ private struct EditorWorkspace: View {
             Rectangle().fill(.white.opacity(0.18))
                 .frame(width: 1, height: 18).padding(.horizontal, 3)
             Button { session.saveNow() } label: {
-                Image(systemName: "square.and.arrow.down")
-                    .frame(width: 22, height: 24)
+                ControlSymbol(name: "square.and.arrow.down")
+                    .compactIconTarget()
                     .overlay(alignment: .topTrailing) {
                         if session.needsSave {
                             Circle().fill(Color.orange)
@@ -515,7 +515,7 @@ private struct EditorWorkspace: View {
                 session.undo()
                 if workspaceView == .pages { session.refreshCurrentPageThumbnail() }
             } label: {
-                Image(systemName: "arrow.uturn.backward").frame(width: 22, height: 24)
+                ControlSymbol(name: "arrow.uturn.backward").compactIconTarget()
             }
             .disabled(!session.canUndo)
             .help(L10n.text("撤销"))
@@ -523,13 +523,13 @@ private struct EditorWorkspace: View {
                 session.redo()
                 if workspaceView == .pages { session.refreshCurrentPageThumbnail() }
             } label: {
-                Image(systemName: "arrow.uturn.forward").frame(width: 22, height: 24)
+                ControlSymbol(name: "arrow.uturn.forward").compactIconTarget()
             }
             .disabled(!session.canRedo)
             .help(L10n.text("重做"))
             if workspaceView == .canvas {
                 Button { session.clearSelectedTarget() } label: {
-                    ClearCanvasIcon().frame(width: 22, height: 24)
+                    ClearCanvasIcon().compactIconTarget()
                 }
                 .disabled(!session.canClearSelectedTarget)
                 .help(session.selectedEditTarget == .mask ? L10n.text("清空蒙版（有选区时仅作用于选区）") : L10n.text("清空图层（有选区时仅作用于选区）"))
@@ -537,20 +537,20 @@ private struct EditorWorkspace: View {
             }
             Spacer(minLength: 8)
             if workspaceView == .canvas, session.hasSelection {
-                HStack(spacing: 1) {
+                HStack(spacing: 0) {
                     Button { session.showsSelectionTint.toggle() } label: {
-                        Image(systemName: "rectangle.dashed.badge.record")
-                            .frame(width: 24, height: 24)
+                        ControlSymbol(name: "rectangle.dashed.badge.record")
+                            .compactIconTarget()
                             .foregroundStyle(session.showsSelectionTint ? Color.blue : Color.primary)
                             .background(session.showsSelectionTint ? Color.blue.opacity(0.25) : .clear)
                     }.help(L10n.text("显示选区覆盖率（蓝色）")).accessibilityLabel(L10n.text("显示选区连续覆盖率"))
                         .accessibilityAddTraits(session.showsSelectionTint ? [.isSelected] : [])
                     Button { session.changeSelection(.invert) } label: {
-                        Image(systemName: "circle.lefthalf.filled").frame(width: 24, height: 24)
+                        ControlSymbol(name: "circle.lefthalf.filled").compactIconTarget()
                     }.help(L10n.text("反转选区")).accessibilityLabel(L10n.text("反转选区"))
                         .keyboardShortcut("i", modifiers: [.command, .shift])
                     Button { session.changeSelection(.clear) } label: {
-                        Image(systemName: "selection.pin.in.out").frame(width: 24, height: 24)
+                        ControlSymbol(name: "selection.pin.in.out").compactIconTarget()
                     }.help(L10n.text("清除选区")).accessibilityLabel(L10n.text("清除选区"))
                         .keyboardShortcut("d", modifiers: [.command])
                 }
@@ -565,7 +565,7 @@ private struct EditorWorkspace: View {
                         HStack(spacing: 5) {
                             Text(session.page.pageSurface.kind.title)
                             Image(systemName: "chevron.down").font(.system(size: 8))
-                        }.padding(.horizontal,6).frame(height: 26)
+                        }.padding(.horizontal,6).frame(height: CompactButtonSize.toolbar.rawValue)
                             .background(showPageModeMenu ? Color.white.opacity(0.14) : .clear)
                             .overlay(Rectangle().stroke(.white.opacity(0.18),lineWidth: 1))
                     }.help(L10n.text("page.surface.type"))
@@ -576,7 +576,7 @@ private struct EditorWorkspace: View {
                 Button {
                     if let previewForm { openPreview(previewForm) }
                 } label: {
-                    Text(verbatim: "3D").font(.system(size: 11, weight: .semibold)).frame(width: 26, height: 26)
+                    Text(verbatim: "3D").font(.system(size: 11, weight: .semibold)).compactIconTarget()
                         .opacity(previewForm == nil ? 0.35 : 1)
                 }.disabled(previewForm == nil)
                     .help(L10n.text("3D预览"))
@@ -584,12 +584,12 @@ private struct EditorWorkspace: View {
                 Text(L10n.format("%@ 页", "\(session.manifest.logicalPageCount)"))
                     .foregroundStyle(.secondary)
                 if session.manifest.pageStructure == .bookSpreads {
-                HStack(spacing: 1) {
+                HStack(spacing: 0) {
                     ForEach(PageStartSide.allCases, id: \.self) { side in
                         Button { session.setStartingSide(side) } label: {
                             Text(side.title)
                                 .font(.system(size: 11))
-                                .padding(.horizontal, 6).frame(height: 25)
+                                .padding(.horizontal, 6).frame(height: CompactButtonSize.toolbar.rawValue)
                                 .background(session.manifest.startingSide == side
                                             ? Color.white.opacity(0.14) : .clear)
                                 .contentShape(Rectangle())
@@ -636,7 +636,7 @@ private struct EditorWorkspace: View {
                 Button {
                     showBrushSettings.toggle()
                 } label: {
-                    Image(systemName: "slider.horizontal.3").frame(width: 22, height: 24)
+                    ControlSymbol(name: "slider.horizontal.3").compactIconTarget()
                 }
                 .background(GeometryReader { geometry in
                     Color.clear.preference(key: BrushSettingsAnchorKey.self,
@@ -647,7 +647,7 @@ private struct EditorWorkspace: View {
         .font(.system(size: 13))
         .buttonStyle(ImmediateButtonStyle())
         .padding(.horizontal, 4)
-        .frame(height: 34)
+        .frame(height: CompactControlMetrics.toolbarHeight)
         .background(Color(red: 0.18, green: 0.19, blue: 0.20))
     }
 
@@ -711,7 +711,7 @@ private struct EditorWorkspace: View {
         VStack(spacing: 2) {
             Button { session.selectBrush(.pencil) } label: {
                 Image(systemName: BrushPresetID.pencil.icon)
-                    .font(.system(size: 17)).frame(width: 34, height: 34)
+                    .font(.system(size: 17)).compactIconTarget(.tool)
                     .background(session.selectedTool == .brush && session.brush.resourceID == nil && session.brush.preset == .pencil
                                 ? Color.gray.opacity(0.4) : Color.clear)
             }
@@ -732,7 +732,7 @@ private struct EditorWorkspace: View {
                         session.selectBrushResource(resource)
                     }
                 })
-                .frame(width: 34, height: 34)
+                .compactIconTarget(.tool)
                 .background {
                     Button(L10n.text("选择墨水笔")) { session.activateInkBrush() }
                         .keyboardShortcut("b", modifiers: []).hidden().accessibilityHidden(true)
@@ -745,7 +745,7 @@ private struct EditorWorkspace: View {
                 activate: { session.selectBrush(.oilFlat) }, choose: { id in
                     if let preset = BrushPresetID(rawValue: id) { session.selectBrush(preset) }
                 })
-                .frame(width: 34, height: 34)
+                .compactIconTarget(.tool)
                 .help(L10n.text("油画笔 · 向右滑动选择笔刷"))
             SlideSelectToolControl(items: BrushPresetID.watercolorPresets.map {
                 SlideSelectToolItem(id: $0.rawValue, name: $0.name, icon: $0.icon)
@@ -754,7 +754,7 @@ private struct EditorWorkspace: View {
                 activate: { session.selectBrush(.watercolorWash) }, choose: { id in
                     if let preset = BrushPresetID(rawValue: id) { session.selectBrush(preset) }
                 })
-                .frame(width: 34, height: 34)
+                .compactIconTarget(.tool)
                 .help(L10n.text("水彩笔 · 向右滑动选择笔刷"))
             toolButton(.eraser, icon: "eraser.fill", name: L10n.text("橡皮擦"))
                 .keyboardShortcut("e", modifiers: [])
@@ -766,7 +766,7 @@ private struct EditorWorkspace: View {
                 choose: { id in
                     if let tool = DrawingTool(rawValue: id), tool.isSelectionTool { activateSelectionTool(tool) }
                 })
-                .frame(width: 34, height: 34)
+                .compactIconTarget(.tool)
                 .background {
                     Group {
                         Button(L10n.text("矩形选区")) { activateSelectionTool(.selection) }
@@ -828,7 +828,7 @@ private struct EditorWorkspace: View {
                 if tool == .bucket { BucketToolIcon().frame(width: 19, height: 19) }
                 else { Image(systemName: icon).font(.system(size: 17)) }
             }
-                .frame(width: 34, height: 34)
+                .compactIconTarget(.tool)
                 .overlay(alignment: .bottomTrailing) {
                     if tool == .lassoFill {
                         Image(systemName: "drop.fill").font(.system(size: 9))
@@ -880,7 +880,7 @@ private struct EditorWorkspace: View {
                 .help(L10n.text("添加图层蒙版"))
                 .accessibilityLabel(L10n.text("添加图层蒙版"))
                 Button { session.toggleSelectedLock() } label: {
-                    layerActionIcon(session.selectedLockActionWillLock ? "lock.fill" : "lock.open")
+                    layerActionIcon(session.selectedLockActionWillLock ? "lock.fill" : "lock.open.fill")
                 }
                 .disabled(session.selectedLayerID == nil)
                 .help(session.selectedLockActionWillLock ? L10n.text("锁定所选图层") : L10n.text("解锁所选图层"))
@@ -902,14 +902,14 @@ private struct EditorWorkspace: View {
                     isExpanded: effectPanel == .tone,
                     action: { session.toggleSelectedTone() },
                     expand: { session.endLayerPropertyEdit(); effectPanel = .tone })
-                    .frame(width: 23, height: 23)
+                    .compactIconTarget()
                     .disabled(session.selectedLayerID == nil)
                 SlideOutButton(icon: "chart.xyaxis.line", label: L10n.text("曲线调整"),
                     isOn: !session.selectedLayerIDs.isEmpty && !session.selectedCurvesWillEnable,
                     isExpanded: effectPanel == .curves,
                     action: { session.toggleSelectedCurves() },
                     expand: { session.endLayerPropertyEdit(); effectPanel = .curves })
-                    .frame(width: 23, height: 23).disabled(session.selectedLayerID == nil)
+                    .compactIconTarget().disabled(session.selectedLayerID == nil)
                 Button { session.showsTargetTint.toggle() } label: {
                     layerActionIcon("drop.halffull")
                         .foregroundStyle(session.showsTargetTint ? Color.blue : Color.primary)
@@ -928,13 +928,7 @@ private struct EditorWorkspace: View {
     }
 
     private func layerActionIcon(_ name: String) -> some View {
-        Image(systemName: name)
-            .resizable()
-            .scaledToFit()
-            .symbolRenderingMode(.monochrome)
-            .frame(width: 14, height: 14)
-            .frame(width: 23, height: 23)
-            .contentShape(Rectangle())
+        ControlSymbol(name: name).compactIconTarget()
     }
 
     private var toneParameters: some View {
@@ -944,7 +938,7 @@ private struct EditorWorkspace: View {
                 Spacer(minLength: 0)
                 Button { session.endLayerPropertyEdit(); effectPanel = nil } label: {
                     Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
-                        .frame(width: 18, height: 18)
+                        .compactIconTarget(.panel)
                 }
                 .accessibilityLabel(L10n.text("关闭网点参数区"))
             }
@@ -1514,7 +1508,7 @@ private final class FloatingPanelContainer: UIView {
         if let brushHost {
             let size = brushHost.sizeThatFits(in: bounds.size)
             let anchor = brushAnchor.isEmpty
-                ? CGRect(x: bounds.width - 198, y: 0, width: 0, height: 34) : brushAnchor
+                ? CGRect(x: bounds.width - 198, y: 0, width: 0, height: CompactControlMetrics.toolbarHeight) : brushAnchor
             let x = min(max(6, anchor.maxX - size.width), max(6, bounds.width - size.width - 6))
             let below = anchor.maxY + 6
             let y = below + size.height <= bounds.height - 6 ? below :
@@ -1523,7 +1517,7 @@ private final class FloatingPanelContainer: UIView {
         }
         if let dynamicsHost {
             let size = dynamicsHost.sizeThatFits(in: bounds.size)
-            let anchor = brushHost?.view.frame ?? CGRect(x: bounds.width - 270, y: 40, width: 264, height: 0)
+            let anchor = brushHost?.view.frame ?? CGRect(x: bounds.width - 270, y: CompactControlMetrics.toolbarHeight + 6, width: 264, height: 0)
             let left = anchor.minX - size.width - 5
             let right = anchor.maxX + 5
             let x = left >= 4 ? left : right + size.width <= bounds.width - 4 ? right :
@@ -1536,7 +1530,7 @@ private final class FloatingPanelContainer: UIView {
             let size = pressureHost.sizeThatFits(in: bounds.size)
             pressureHost.view.frame = CGRect(origin: CGPoint(
                 x: min(33, max(4, bounds.width - size.width - 4)),
-                y: min(41, max(4, bounds.height - size.height - 4))), size: size)
+                y: min(CompactControlMetrics.toolbarHeight + 7, max(4, bounds.height - size.height - 4))), size: size)
         }
         if let colorHost {
             let size = colorHost.sizeThatFits(in: bounds.size)
@@ -1694,6 +1688,7 @@ private struct ColorEditorPanel: View {
                 Button(action: close) {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .semibold))
+                        .compactIconTarget(.panel)
                 }
                 .buttonStyle(ImmediateButtonStyle())
                 .accessibilityLabel(L10n.text("关闭颜色面板"))

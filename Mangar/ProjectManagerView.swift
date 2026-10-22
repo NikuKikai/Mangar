@@ -68,11 +68,11 @@ struct ProjectManagerView: View {
     var body: some View {
         let _ = interfaceLanguage
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 4) {
+            HStack(spacing: CompactControlMetrics.buttonSpacing) {
                 Button { close?() } label: {
                     MangarLogoMark()
                         .frame(width: 22, height: 22)
-                        .frame(width: 25, height: 24)
+                        .compactIconTarget()
                 }
                 .disabled(close == nil)
                 .help(close == nil ? "Mangar" : L10n.text("返回编辑界面"))
@@ -96,14 +96,14 @@ struct ProjectManagerView: View {
                     menuProjectID = nil
                     showingPresets = false
                     showingAppMenu.toggle()
-                } label: { Image(systemName: "line.3.horizontal").frame(width: 22, height: 24) }
+                } label: { ControlSymbol(name: "line.3.horizontal").compactIconTarget() }
                     .help(L10n.text("应用菜单")).accessibilityLabel(L10n.text("应用菜单"))
             }
             .font(.system(size: 13))
             .buttonStyle(ImmediateButtonStyle())
             .controlSize(.mini)
             .padding(.horizontal, 4)
-            .frame(height: 34)
+            .frame(height: CompactControlMetrics.toolbarHeight)
             .background(Color(red: 0.18, green: 0.19, blue: 0.20))
             Rectangle().fill(Color.black.opacity(0.45)).frame(height: 1)
             if creating {
@@ -136,7 +136,7 @@ struct ProjectManagerView: View {
                         .background(Color(red: 0.16, green: 0.17, blue: 0.18))
                         .overlay(Rectangle().stroke(.white.opacity(0.25), lineWidth: 1))
                         .shadow(color: .black.opacity(0.45), radius: 8, y: 4)
-                        .offset(x: -4, y: 35)
+                        .offset(x: -4, y: CompactControlMetrics.toolbarHeight + 1)
                 }.buttonStyle(ImmediateButtonStyle())
             }
         }
@@ -169,15 +169,17 @@ struct ProjectManagerView: View {
                             .font(.system(size: 13))
                         HStack(spacing: 8) {
                             Spacer()
-                            Button(L10n.text("取消")) { pendingDelete = nil }
-                                .padding(.horizontal, 12).frame(height: 30)
-                                .background(Color.white.opacity(0.08))
-                            Button(L10n.text("删除")) {
+                            Button { pendingDelete = nil } label: {
+                                Text(L10n.text("取消")).padding(.horizontal,6).frame(height: 24)
+                                    .background(Color.white.opacity(0.08))
+                            }
+                            Button {
                                 pendingDelete = nil
                                 delete(project.url)
+                            } label: {
+                                Text(L10n.text("删除")).padding(.horizontal,6).frame(height: 24)
+                                    .background(Color(red: 0.65, green: 0.16, blue: 0.16))
                             }
-                            .padding(.horizontal, 12).frame(height: 30)
-                            .background(Color(red: 0.65, green: 0.16, blue: 0.16))
                         }
                         .buttonStyle(ImmediateButtonStyle())
                     }

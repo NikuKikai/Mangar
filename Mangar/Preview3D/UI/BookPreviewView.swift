@@ -10,14 +10,14 @@ struct BookPreviewView: View {
     var body: some View {
         let _=language
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Button(action: close) { Image(systemName: "chevron.left").frame(width: 26,height: 26) }
+            HStack(spacing: CompactControlMetrics.buttonSpacing) {
+                Button(action: close) { ControlSymbol(name: "chevron.left").compactIconTarget() }
                     .accessibilityLabel(L10n.text("关闭三维预览"))
                 Text(L10n.text("3D预览")).font(.system(size: 12))
                 Text(controller.source.manifest.name).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 0)
                 // Book arrangement currently reads right-to-left: left advances.
-                Button { controller.jump(1) } label: { Image(systemName: "chevron.left").frame(width: 26,height: 26) }
+                Button { controller.jump(1) } label: { ControlSymbol(name: "chevron.left").compactIconTarget() }
                     .disabled(controller.opening+1 >= controller.count || controller.loading || controller.isTurning)
                     .accessibilityLabel(L10n.text("下一对开"))
                 TextField("", text: $pageInput)
@@ -33,7 +33,7 @@ struct BookPreviewView: View {
                     }
                 Text(verbatim: "/ \(controller.count)")
                     .monospacedDigit().font(.system(size: 11))
-                Button { controller.jump(-1) } label: { Image(systemName: "chevron.right").frame(width: 26,height: 26) }
+                Button { controller.jump(-1) } label: { ControlSymbol(name: "chevron.right").compactIconTarget() }
                     .disabled(controller.opening == 0 || controller.loading || controller.isTurning)
                     .accessibilityLabel(L10n.text("上一对开"))
                 Rectangle().fill(.white.opacity(0.15)).frame(width: 1,height: 18)
@@ -41,10 +41,10 @@ struct BookPreviewView: View {
                 FlatSlider(value: Binding(get: { Double(controller.gutterCurvature) },
                                           set: { controller.setGutterCurvature(Float($0)) }),range: 0...0.4)
                     .frame(width: 70)
-                Button { controller.reset() } label: { Image(systemName: "arrow.counterclockwise").frame(width: 26,height: 26) }
+                Button { controller.reset() } label: { ControlSymbol(name: "arrow.counterclockwise").compactIconTarget() }
                     .accessibilityLabel(L10n.text("重置三维视角"))
             }
-            .padding(.horizontal, 4).frame(height: 34).background(Color(white: 0.16))
+            .padding(.horizontal, 4).frame(height: CompactControlMetrics.toolbarHeight).background(Color(white: 0.16))
             Rectangle().fill(.black).frame(height: 1)
             ZStack(alignment: .bottomLeading) {
                 BookPreviewSurface(controller: controller)

@@ -18,7 +18,7 @@ struct BrushDynamicsPanel: View {
             HStack(spacing: 3) {
                 Text(L10n.format("%@ · %@动态", "\(brushName)", "\(parameter.name)")).font(.system(size: 11, weight: .semibold))
                 Spacer(minLength: 2)
-                Button(action: close) { Image(systemName: "xmark").font(.system(size: 10)).frame(width: 18, height: 18) }
+                Button(action: close) { Image(systemName: "xmark").font(.system(size: 10)).compactIconTarget(.panel) }
                     .accessibilityLabel(L10n.text("关闭动态曲线面板"))
             }
             HStack(spacing: 2) {

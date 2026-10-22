@@ -16,6 +16,24 @@ extension View {
     func immediateUI() -> some View { modifier(ImmediateUIModifier()) }
 }
 
+/// Shared square targets; glyph sizing stays independent of button geometry.
+enum CompactButtonSize: CGFloat {
+    case toolbar = 24
+    case panel = 18
+    case tool = 34
+}
+enum CompactControlMetrics {
+    static let buttonSpacing: CGFloat = 1
+    static var toolbarHeight: CGFloat { CompactButtonSize.toolbar.rawValue + 2 }
+}
+extension View {
+    /// Apply inside a Button label, after sizing its glyph.
+    func compactIconTarget(_ size: CompactButtonSize = .toolbar) -> some View {
+        frame(width: size.rawValue, height: size.rawValue)
+            .contentShape(Rectangle())
+    }
+}
+
 /// Shared press feedback is immediate and layers over existing selected colors.
 struct ImmediatePressFeedback: ViewModifier {
     let pressed: Bool
@@ -35,6 +53,7 @@ struct ImmediateButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.opacity(enabled ? 1 : 0.35)
+            .contentShape(Rectangle())
             .modifier(ImmediatePressFeedback(pressed: configuration.isPressed && showsPressFeedback))
     }
 }
@@ -44,8 +63,10 @@ struct ImmediateBorderedButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .frame(minHeight: CompactButtonSize.toolbar.rawValue)
+            .contentShape(Rectangle())
             .foregroundStyle(prominent ? Color.white : Color.primary)
             .background(prominent ? Color.accentColor : Color.white.opacity(0.08))
             .overlay(Rectangle().stroke(.white.opacity(0.18), lineWidth: 1))

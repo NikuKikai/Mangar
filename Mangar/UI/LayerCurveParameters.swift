@@ -17,7 +17,7 @@ struct LayerCurveParameters: View {
             HStack(spacing: 3) {
                 Text(L10n.text("曲线调整")).font(.system(size: 10, weight: .semibold))
                 Spacer(minLength: 0)
-                Button(action: close) { Image(systemName: "xmark").font(.system(size: 9)).frame(width: 18, height: 18) }
+                Button(action: close) { Image(systemName: "xmark").font(.system(size: 9)).compactIconTarget(.panel) }
                     .accessibilityLabel(L10n.text("关闭曲线参数区"))
             }
             HStack(spacing: 2) {

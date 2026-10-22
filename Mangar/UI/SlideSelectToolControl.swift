@@ -44,7 +44,8 @@ final class SlideSelectToolView: UIControl, UIGestureRecognizerDelegate {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        icon.contentMode = .scaleAspectFit
+        icon.contentMode = .center
+        icon.clipsToBounds = false
         icon.tintColor = .white
         icon.isUserInteractionEnabled = false
         indicator.isUserInteractionEnabled = false
@@ -76,7 +77,7 @@ final class SlideSelectToolView: UIControl, UIGestureRecognizerDelegate {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        icon.frame = CGRect(x: (bounds.width - 20) / 2, y: (bounds.height - 20) / 2, width: 20, height: 20)
+        icon.frame = bounds
         indicator.frame = CGRect(x: bounds.maxX - 3, y: (bounds.height - 7) / 2, width: 1, height: 7)
     }
     override func didMoveToWindow() {
@@ -138,7 +139,7 @@ final class SlideSelectToolView: UIControl, UIGestureRecognizerDelegate {
             let image = UIImageView(image: UIImage(systemName: item.icon,
                 withConfiguration: UIImage.SymbolConfiguration(pointSize: 15)) ?? UIImage(systemName: "pencil.tip"))
             image.tintColor = .white
-            image.contentMode = .scaleAspectFit
+            image.contentMode = .center
             image.frame = CGRect(x: 6, y: 5, width: 20, height: 20)
             image.isUserInteractionEnabled = false
             row.addSubview(image)

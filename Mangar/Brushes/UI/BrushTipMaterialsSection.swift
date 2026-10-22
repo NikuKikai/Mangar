@@ -26,7 +26,7 @@ struct BrushTipMaterialsSection: View {
                             .background(channel == item ? Color.accentColor.opacity(0.35) : Color.black.opacity(0.2))
                     }
                 }
-                Button { importsTips = true } label: { Image(systemName: "plus").frame(width: 22, height: 18) }
+                Button { importsTips = true } label: { Image(systemName: "plus").compactIconTarget(.panel) }
                     .disabled(brush.stampSettings.assetIDs.count >= 16)
             }
             if !brush.stampSettings.assetIDs.isEmpty {
@@ -35,13 +35,13 @@ struct BrushTipMaterialsSection: View {
                     let assets = (try? BrushResourceStore.shared.assets(for: brush)) ?? []
                     ForEach(Array(assets.enumerated()), id: \.offset) { index, asset in
                         VStack(spacing: 2) {
-                            tipPreview(asset).frame(width: 42, height: 38).background(.black.opacity(0.3))
+                            tipPreview(asset).frame(width: 50, height: 38).background(.black.opacity(0.3))
                             HStack(spacing: 0) {
-                                Button { moveTip(index) } label: { Image(systemName: "chevron.left").frame(width: 14, height: 16) }
+                                Button { moveTip(index) } label: { Image(systemName: "chevron.left").compactIconTarget(.panel) }
                                     .disabled(index == 0)
                                 Text("\(index + 1)").frame(width: 14)
                                 Button { brush.stampSettings.assetIDs.remove(at: index) } label: {
-                                    Image(systemName: "xmark").frame(width: 14, height: 16)
+                                    Image(systemName: "xmark").compactIconTarget(.panel)
                                 }
                             }
                         }

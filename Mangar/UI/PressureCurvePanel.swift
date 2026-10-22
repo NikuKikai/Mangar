@@ -13,7 +13,7 @@ struct PressureCurvePanel: View {
                 Spacer(minLength: 4)
                 Button(action: close) {
                     Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
-                        .frame(width: 20, height: 20)
+                        .compactIconTarget(.panel)
                 }
                 .accessibilityLabel(L10n.text("关闭压感曲线面板"))
             }

@@ -28,6 +28,7 @@ struct SlideOutButton: UIViewRepresentable {
 final class SlideOutButtonView: UIControl {
     private let image = UIImageView()
     private let indicator = UIView()
+    private var artwork = ControlSymbolArtwork.metrics(for: "circle.grid.3x3.fill")
     private var expanded = false
     private var pendingExpansion = false
     private var action: (() -> Void)?
@@ -35,7 +36,8 @@ final class SlideOutButtonView: UIControl {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        image.contentMode = .scaleAspectFit
+        image.contentMode = .center
+        image.clipsToBounds = false
         image.isUserInteractionEnabled = false
         indicator.isUserInteractionEnabled = false
         addSubview(image)
@@ -47,8 +49,9 @@ final class SlideOutButtonView: UIControl {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func configure(icon: String, label: String, isOn: Bool, isExpanded: Bool,
                    enabled: Bool, action: @escaping () -> Void, expand: @escaping () -> Void) {
+        artwork = ControlSymbolArtwork.metrics(for: icon)
         image.image = UIImage(systemName: icon,
-            withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .regular))
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: artwork.pointSize, weight: .regular))
         accessibilityCustomActions = [UIAccessibilityCustomAction(name: L10n.text("展开参数"), target: self, selector: #selector(accessibilityExpand))]
         accessibilityLabel = label
         accessibilityHint = L10n.text("单击开关；按住向下移出按钮并松开展开参数")
@@ -60,12 +63,14 @@ final class SlideOutButtonView: UIControl {
         isEnabled = enabled
         self.action = action
         self.expand = expand
+        setNeedsLayout()
         updateAppearance()
     }
     override func layoutSubviews() {
         super.layoutSubviews()
-        image.frame = CGRect(x: (bounds.width - 14) / 2, y: (bounds.height - 14) / 2,
-                             width: 14, height: 14)
+        // Center the native glyph in the control; reserve one point above the
+        // slide-out indicator without shrinking wide/tall symbols to 14x14.
+        image.frame = bounds.offsetBy(dx: artwork.offset.width, dy: artwork.offset.height - 1)
         indicator.frame = CGRect(x: (bounds.width - 7) / 2, y: bounds.height - 3,
                                  width: 7, height: 1)
     }

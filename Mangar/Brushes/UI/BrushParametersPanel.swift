@@ -19,7 +19,7 @@ struct BrushParametersPanel: View {
             HStack(spacing: 3) {
                 Text(L10n.format("%@参数", "\(brushName)")).lineLimit(1).font(.system(size: 11, weight: .semibold))
                 Spacer(minLength: 2)
-                Button(action: close) { Image(systemName: "xmark").font(.system(size: 10)).frame(width: 18, height: 18) }
+                Button(action: close) { Image(systemName: "xmark").font(.system(size: 10)).compactIconTarget(.panel) }
                     .accessibilityLabel(L10n.text("关闭画笔参数"))
             }.frame(height: 20)
             ScrollView {
@@ -140,12 +140,12 @@ struct BrushParametersPanel: View {
                 Button { editDynamics(parameter) } label: {
                     Image(systemName: "waveform.path").font(.system(size: 11))
                         .foregroundStyle(enabled ? Color.accentColor : .white.opacity(0.55))
-                        .frame(width: 18, height: 16)
+                        .compactIconTarget(.panel)
                         .background(enabled ? Color.accentColor.opacity(0.18) : .clear)
                 }
                 .accessibilityLabel(L10n.format("%@动态曲线", "\(title)"))
                 .accessibilityValue(enabled ? L10n.text("已启用") : L10n.text("未启用"))
-            } else { Color.clear.frame(width: 18, height: 16) }
+            } else { Color.clear.compactIconTarget(.panel) }
         }.frame(height: 18)
     }
 }

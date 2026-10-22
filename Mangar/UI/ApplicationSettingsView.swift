@@ -6,17 +6,17 @@ struct ApplicationSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 4) {
+            HStack(spacing: CompactControlMetrics.buttonSpacing) {
                 Button(action: close) {
-                    MangarLogoMark().frame(width: 22, height: 22).frame(width: 25, height: 24)
+                    MangarLogoMark().frame(width: 22, height: 22).compactIconTarget()
                 }.accessibilityLabel(L10n.text("settings.close"))
                 Rectangle().fill(.white.opacity(0.18)).frame(width: 1, height: 18).padding(.horizontal, 3)
                 Text(L10n.text("settings.title"))
                 Spacer(minLength: 8)
-                Button(action: close) { Image(systemName: "xmark").frame(width: 22, height: 24) }
+                Button(action: close) { ControlSymbol(name: "xmark").compactIconTarget() }
                     .accessibilityLabel(L10n.text("settings.close"))
             }
-            .font(.system(size: 13)).padding(.horizontal, 4).frame(height: 34)
+            .font(.system(size: 13)).padding(.horizontal, 4).frame(height: CompactControlMetrics.toolbarHeight)
             .background(Color(red: 0.18, green: 0.19, blue: 0.20))
             Rectangle().fill(Color.black.opacity(0.45)).frame(height: 1)
             ScrollView {

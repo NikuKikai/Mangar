@@ -23,6 +23,14 @@ nonisolated struct CanvasBoundary: Codable, Equatable {
         p.x.isFinite && p.y.isFinite && (!hasMinimumX || p.x >= 0) && (width.map { p.x < Double($0) } ?? true) &&
             (!hasMinimumY || p.y >= 0) && (height.map { p.y < Double($0) } ?? true)
     }
+    /// A navigation center can reach a finite edge, but cannot pass it.
+    /// Unlike pixel containment, endpoints are inclusive here.
+    func clampedPoint(_ point: CGPoint) -> CGPoint {
+        let x = hasMinimumX ? max(0, point.x) : point.x
+        let y = hasMinimumY ? max(0, point.y) : point.y
+        return CGPoint(x: width.map { min(CGFloat($0), x) } ?? x,
+                       y: height.map { min(CGFloat($0), y) } ?? y)
+    }
     func clip(_ rect: CGRect) -> CGRect {
         guard !rect.isNull else { return .null }
         let x0 = hasMinimumX ? max(0,rect.minX) : rect.minX, y0 = hasMinimumY ? max(0,rect.minY) : rect.minY
@@ -50,4 +58,5 @@ struct ProjectCreation {
     var layout: ComicPageLayout?
     var pageCount: Int
     var startingSide: PageStartSide
+    var surface: PageSurface = .normal
 }

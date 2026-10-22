@@ -49,11 +49,11 @@ final class EditorSession: ObservableObject {
     let renderer: MetalCanvasRenderer
     private let store: ProjectStore
 
-    func makeBookPreviewSource() throws -> BookPreviewSource {
+    func makeDocumentPreviewSource() throws -> DocumentPreviewSource {
         endStroke()
         endLayerPropertyEdit()
         releaseModifiers()
-        return BookPreviewSource(manifest: manifest, currentPage: page,
+        return DocumentPreviewSource(manifest: manifest, currentPage: page,
             currentArchive: try renderer.checkpointArchive(), store: store)
     }
     private var history: CommandHistory
@@ -742,7 +742,7 @@ final class EditorSession: ObservableObject {
         do {
             if manifest.pageStructure == .cards {
                 let newPage = PageRecord.blank(name: L10n.text("新页面"), width: page.width, height: page.height,
-                    boundary: manifest.initialBoundary ?? page.boundary)
+                    boundary: manifest.initialBoundary ?? page.boundary, surface: page.pageSurface)
                 let preview = try MetalCanvasRenderer(page: newPage).projectThumbnailPNG()
                 var updated = manifest
                 try store.insertPage(newPage, at: index, into: &updated, thumbnail: preview)
@@ -825,7 +825,7 @@ final class EditorSession: ObservableObject {
             // Keep an editable project when deleting its last page.
             let outputs: [ConvertedPage] = manifest.pageIDs.count == 1 ?
                 [ConvertedPage(page: .blank(width: page.width, height: page.height,
-                    comicLayout: page.comicLayout, isSpread: page.isDoublePage, boundary: page.boundary), tiles: [:])] : []
+                    comicLayout: page.comicLayout, isSpread: page.isDoublePage, boundary: page.boundary, surface: page.pageSurface), tiles: [:])] : []
             try replacePages([id], outputs: outputs)
         } catch { message = L10n.format("删除失败：%@", "\(error.localizedDescription)") }
     }
@@ -984,8 +984,17 @@ final class EditorSession: ObservableObject {
         if previousPrimary != selectedLayerID || selectedLayer?.hasMask != true { selectedEditTarget = .content }
     }
 
+    func setPageSurface(_ surface: PageSurface) {
+        endStroke()
+        let value = surface.normalized
+        guard value != page.pageSurface else { return }
+        perform(.setPageSurface(value))
+    }
+
     private func apply(_ command: EditCommand) {
         switch command {
+        case .setPageSurface(let surface):
+            page.surface = surface.normalized
         case .clearLayer(let clear):
             guard page.layers.contains(where: { $0.id == clear.layerID }) else { return }
             renderer.commitClear(clear)

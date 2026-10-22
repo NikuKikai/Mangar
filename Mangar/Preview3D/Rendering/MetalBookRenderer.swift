@@ -1,8 +1,6 @@
 import MetalKit
 import simd
 
-enum BookRenderingError: Error { case unavailable }
-
 @MainActor
 final class MetalBookRenderer: NSObject, MTKViewDelegate {
     struct Uniforms {
@@ -40,7 +38,7 @@ final class MetalBookRenderer: NSObject, MTKViewDelegate {
 
     init(layout: BookPreviewLayout) throws {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
-            throw BookRenderingError.unavailable
+            throw DocumentPreviewRenderingError.unavailable
         }
         self.device=device; self.queue=queue; self.layout=layout
         let library = try device.makeLibrary(source: BookShaders.source, options: nil)
@@ -59,14 +57,14 @@ final class MetalBookRenderer: NSObject, MTKViewDelegate {
         shadowDescriptor.vertexFunction=library.makeFunction(name: "bookSpineShadowVertex")
         spineShadowPipeline=try device.makeRenderPipelineState(descriptor: shadowDescriptor)
         let bindingVertices=BookSpineMesh.vertices()
-        guard let binding=device.makeBuffer(bytes: bindingVertices,length: bindingVertices.count*MemoryLayout<BookSpineVertex>.stride) else { throw BookRenderingError.unavailable }
+        guard let binding=device.makeBuffer(bytes: bindingVertices,length: bindingVertices.count*MemoryLayout<BookSpineVertex>.stride) else { throw DocumentPreviewRenderingError.unavailable }
         spineMesh=binding; spineVertexCount=bindingVertices.count
         let shadowTexture=MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .depth32Float,width: 1024,height: 1024,mipmapped: false)
         shadowTexture.storageMode = .private; shadowTexture.usage = [.shaderRead,.renderTarget]
-        guard let map=device.makeTexture(descriptor: shadowTexture) else { throw BookRenderingError.unavailable }
+        guard let map=device.makeTexture(descriptor: shadowTexture) else { throw DocumentPreviewRenderingError.unavailable }
         shadowMap=map
         let depth = MTLDepthStencilDescriptor(); depth.depthCompareFunction = .less; depth.isDepthWriteEnabled = true
-        guard let state = device.makeDepthStencilState(descriptor: depth) else { throw BookRenderingError.unavailable }
+        guard let state = device.makeDepthStencilState(descriptor: depth) else { throw DocumentPreviewRenderingError.unavailable }
         depthState = state
         var vertices: [SIMD2<Float>] = []
         let columns = 96, rows = 12
@@ -78,7 +76,7 @@ final class MetalBookRenderer: NSObject, MTKViewDelegate {
             vertices += [a,b,c,b,d,c]
         }}
         guard let buffer = device.makeBuffer(bytes: vertices,length: vertices.count*MemoryLayout<SIMD2<Float>>.stride),
-              let texture = device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,width: 1,height: 1,mipmapped: false)) else { throw BookRenderingError.unavailable }
+              let texture = device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,width: 1,height: 1,mipmapped: false)) else { throw DocumentPreviewRenderingError.unavailable }
         mesh=buffer; vertexCount=vertices.count; white=texture
         var pixel: UInt32 = 0xffffffff
         texture.replace(region: MTLRegionMake2D(0,0,1,1),mipmapLevel: 0,withBytes: &pixel,bytesPerRow: 4)

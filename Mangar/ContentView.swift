@@ -299,6 +299,8 @@ private struct EditorWorkspace: View {
     @State private var showExport = false
     @State private var workspaceView: WorkspaceView = .canvas
     @State private var bookPreview: BookPreviewController?
+    @State private var spherePreview: SpherePreviewController?
+    @State private var showPageModeMenu = false
 
     var body: some View {
         let _ = interfaceLanguage
@@ -387,6 +389,23 @@ private struct EditorWorkspace: View {
                 }
             }
         }
+        .overlayPreferenceValue(PageModeAnchorKey.self) { anchor in
+            if showPageModeMenu, let anchor {
+                GeometryReader { geometry in
+                    let frame=geometry[anchor]
+                    ZStack(alignment: .topLeading) {
+                        Button { showPageModeMenu = false } label: {
+                            Color.clear.contentShape(Rectangle())
+                        }
+                        .buttonStyle(ImmediateButtonStyle(showsPressFeedback: false))
+                        .keyboardShortcut(.cancelAction)
+                        .accessibilityLabel(L10n.text("page.surface.closeMenu"))
+                        PageSurfacePanel(session: session).id(session.page.id)
+                            .offset(x: max(0,min(frame.minX,geometry.size.width-286)), y: frame.maxY+2)
+                    }
+                }
+            }
+        }
         .overlay {
             if showExport {
                 ExportSettingsView(session: session, close: { showExport = false })
@@ -397,9 +416,14 @@ private struct EditorWorkspace: View {
             if let bookPreview {
                 BookPreviewView(controller: bookPreview) { self.bookPreview = nil }
             }
+            if let spherePreview {
+                SpherePreviewView(controller: spherePreview) { self.spherePreview = nil }
+            }
         }
         .controlSize(.mini)
+        .onChange(of: session.page.id) { _, _ in showPageModeMenu = false }
         .onChange(of: workspaceView) { _, view in
+            showPageModeMenu = false
             session.renderer.setViewportVisible(view == .canvas)
         }
         .alert("Mangar", isPresented: Binding(
@@ -423,6 +447,7 @@ private struct EditorWorkspace: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             showAppMenu = false
+            showPageModeMenu = false
             session.flushBrushResource()
             session.endStroke()
             session.releaseModifiers()
@@ -442,6 +467,7 @@ private struct EditorWorkspace: View {
             .help(L10n.text("项目管理"))
             .accessibilityLabel(L10n.text("项目管理"))
             Button {
+                showPageModeMenu = false
                 showAppMenu.toggle()
             } label: {
                 Image(systemName: "line.3.horizontal")
@@ -531,14 +557,30 @@ private struct EditorWorkspace: View {
                 Rectangle().fill(.white.opacity(0.18)).frame(width: 1, height: 18).padding(.horizontal, 3)
             }
             if workspaceView == .pages {
-                if DocumentPreviewForm.resolve(session.manifest) != nil {
+                if session.manifest.purpose == .unrestricted {
                     Button {
-                        do { bookPreview = try BookPreviewController(source: session.makeBookPreviewSource()) }
-                        catch { session.message = error.localizedDescription }
+                        showAppMenu = false
+                        showPageModeMenu.toggle()
                     } label: {
-                        Text(verbatim: "3D").font(.system(size: 11, weight: .semibold)).frame(width: 26, height: 26)
-                    }.help(L10n.text("3D预览"))
+                        HStack(spacing: 5) {
+                            Text(session.page.pageSurface.kind.title)
+                            Image(systemName: "chevron.down").font(.system(size: 8))
+                        }.padding(.horizontal,6).frame(height: 26)
+                            .background(showPageModeMenu ? Color.white.opacity(0.14) : .clear)
+                            .overlay(Rectangle().stroke(.white.opacity(0.18),lineWidth: 1))
+                    }.help(L10n.text("page.surface.type"))
+                        .accessibilityLabel(L10n.text("page.surface.type"))
+                        .anchorPreference(key: PageModeAnchorKey.self,value: .bounds) { $0 }
                 }
+                let previewForm = DocumentPreviewForm.resolve(session.manifest, page: session.page)
+                Button {
+                    if let previewForm { openPreview(previewForm) }
+                } label: {
+                    Text(verbatim: "3D").font(.system(size: 11, weight: .semibold)).frame(width: 26, height: 26)
+                        .opacity(previewForm == nil ? 0.35 : 1)
+                }.disabled(previewForm == nil)
+                    .help(L10n.text("3D预览"))
+                    .accessibilityLabel(L10n.text("3D预览"))
                 Text(L10n.format("%@ 页", "\(session.manifest.logicalPageCount)"))
                     .foregroundStyle(.secondary)
                 if session.manifest.pageStructure == .bookSpreads {
@@ -607,6 +649,20 @@ private struct EditorWorkspace: View {
         .padding(.horizontal, 4)
         .frame(height: 34)
         .background(Color(red: 0.18, green: 0.19, blue: 0.20))
+    }
+
+    private func openPreview(_ form: DocumentPreviewForm) {
+        showPageModeMenu = false
+        do {
+            let source = try session.makeDocumentPreviewSource()
+            switch form {
+            case .book: bookPreview = try BookPreviewController(source: source)
+            case .sphere:
+                let geometry = session.renderer.viewportGeometry
+                let center = session.renderer.canvasPoint(from: CGPoint(x: geometry.size.width/2,y: geometry.size.height/2))
+                spherePreview = try SpherePreviewController(source: source,center: center)
+            }
+        } catch { session.message = error.localizedDescription }
     }
 
     private var appMenu: some View {
@@ -1431,6 +1487,13 @@ private struct ThumbnailChecker: View {
 
 /// Only the visible panel frames participate in hit testing. The rest of this
 /// full-size overlay returns nil so Pencil and finger touches reach the canvas.
+private struct PageModeAnchorKey: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>? { nil }
+    static func reduce(value: inout Anchor<CGRect>?,nextValue: () -> Anchor<CGRect>?) {
+        if let next=nextValue() { value=next }
+    }
+}
+
 private struct BrushSettingsAnchorKey: PreferenceKey {
     static var defaultValue: CGRect { .zero }
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {

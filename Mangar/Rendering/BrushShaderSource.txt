@@ -139,6 +139,11 @@ struct GuideUniforms {
 fragment float4 pageGuideFragment(QuadOutput in [[stage_in]],
                                   constant GuideUniforms &u [[buffer(0)]]) {
     float2 p = in.canvasPosition;
+    if (u.zoomAndPadding.y > 0.5) {
+        float distancePixels = abs(length(p-u.rect.xy)-u.rect.z)*u.zoomAndPadding.x;
+        if (distancePixels > 0.8) discard_fragment();
+        return u.color;
+    }
     float padding = max(1.0, 1.0 / max(u.zoomAndPadding.x, 0.001));
     if (p.x < u.rect.x - padding || p.x > u.rect.z + padding ||
         p.y < u.rect.y - padding || p.y > u.rect.w + padding) discard_fragment();

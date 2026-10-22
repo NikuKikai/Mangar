@@ -10,7 +10,7 @@ private final class PageTurnDisplayTarget: NSObject {
 
 @MainActor
 final class BookPreviewController: ObservableObject {
-    let source: BookPreviewSource
+    let source: DocumentPreviewSource
     let renderer: MetalBookRenderer
     @Published var opening = 0
     @Published var loading = true
@@ -23,7 +23,7 @@ final class BookPreviewController: ObservableObject {
     private var task: Task<Void, Never>?
     private var ready: Set<Int> = []
 
-    init(source: BookPreviewSource) throws {
+    init(source: DocumentPreviewSource) throws {
         self.source=source
         let layout=BookPreviewLayout(manifest: source.manifest)
         renderer=try MetalBookRenderer(layout: layout)

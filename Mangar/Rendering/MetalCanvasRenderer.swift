@@ -1436,6 +1436,21 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             frames.append((CGRect(x: page.contentRect.midX, y: 0, width: 0, height: CGFloat(page.height)),
                            SIMD4<Float>(0.18, 0.48, 0.95, 1)))
         }
+        if page.pageSurface.kind == .sphere, let view {
+            let center = canvasPoint(from: CGPoint(x: view.bounds.midX,y: view.bounds.midY))
+            let radius = page.pageSurface.sourceRadius
+            // Clip the quad to visible canvas bounds, keeping coordinates origin-relative.
+            let bounds = CGRect(x: center.x-radius,y: center.y-radius,width: radius*2,height: radius*2).intersection(renderBounds)
+            if !bounds.isNull {
+                encoder.setRenderPipelineState(pageGuidePipeline)
+                var quad = worldQuad(bounds.insetBy(dx: -2/CGFloat(zoom),dy: -2/CGFloat(zoom)),viewport: viewport,zoom: zoom,rotation: rotation,pan: pan)
+                var uniforms = GuideUniforms(rect: SIMD4(Float(center.x-renderOrigin.x),Float(center.y-renderOrigin.y),Float(radius),0),
+                    zoomAndPadding: SIMD4(zoom,1,0,0),color: SIMD4(0.18,0.48,0.95,1))
+                encoder.setVertexBytes(&quad,length: MemoryLayout<QuadUniforms>.stride,index: 0)
+                encoder.setFragmentBytes(&uniforms,length: MemoryLayout<GuideUniforms>.stride,index: 0)
+                encoder.drawPrimitives(type: .triangle,vertexStart: 0,vertexCount: 6)
+            }
+        }
         guard !frames.isEmpty else { return }
         encoder.setRenderPipelineState(pageGuidePipeline)
         let padding = CGFloat(max(1, 1 / max(zoom, 0.001)))
@@ -1666,7 +1681,11 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
 
     /// Trimmed paper texture for document previews; independent of editing overlays.
     func bookPreviewTexture(maxDimension: Double = 1280) throws -> MTLTexture {
-        let bounds = page.contentRect
+        try previewTexture(bounds: page.contentRect, maxDimension: maxDimension)
+    }
+
+    /// Bounded compositor output for arbitrary signed canvas coordinates.
+    func previewTexture(bounds: CGRect, maxDimension: Double) throws -> MTLTexture {
         let scale = min(maxDimension / bounds.width, maxDimension / bounds.height, 1)
         let width = max(1, Int((bounds.width * scale).rounded()))
         let height = max(1, Int((bounds.height * scale).rounded()))
@@ -1690,6 +1709,9 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         command.commit()
         command.waitUntilCompleted()
         guard command.status == .completed else { throw RendererError.exportFailed }
+        // Region previews reuse a compositor while panning. Release old regions
+        // through the same bounded tile cache used by the editing viewport.
+        trimResidentTiles()
         return texture
     }
 

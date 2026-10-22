@@ -49,6 +49,7 @@ struct BrushEngineChecks {
         let device = MTLCreateSystemDefaultDevice()!
         let queue = device.makeCommandQueue()!
         try BookPreviewChecks.run(device: device, queue: queue)
+        try SpherePreviewChecks.run(device: device, queue: queue)
         var source = try String(contentsOf: root.appendingPathComponent("Mangar/Rendering/BrushShaderSource.txt"), encoding: .utf8) + "\n" +
             String(contentsOf: root.appendingPathComponent("Mangar/Brushes/GPU/PigmentMixing.txt"), encoding: .utf8) + "\n" +
             String(contentsOf: root.appendingPathComponent("Mangar/Brushes/GPU/BrushKernels.txt"), encoding: .utf8)
@@ -69,6 +70,7 @@ struct BrushEngineChecks {
         }
         """
         let library = try await device.makeLibrary(source: source, options: nil)
+        try SpherePreviewChecks.checkGuides(device: device,queue: queue,library: library)
         let engine = try MetalBrushEngine(device: device, queue: queue, library: library)
         let layer = UUID()
         func command(_ preset: BrushPresetID, _ samples: [StrokeSample], size: Double = 24) -> StrokeCommand {

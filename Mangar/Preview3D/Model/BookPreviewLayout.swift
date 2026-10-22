@@ -1,14 +1,5 @@
 import Foundation
 
-/// Presentation is resolved from two independent document dimensions. New forms
-/// can supply their own geometry without changing the editor's page arrangement.
-enum DocumentPreviewForm {
-    case book
-    static func resolve(_ manifest: ProjectManifest) -> Self? {
-        manifest.purpose == .book && manifest.pageStructure == .bookSpreads ? .book : nil
-    }
-}
-
 struct BookPageFace: Equatable {
     var source: UUID?
     /// Horizontal range within a trimmed source image; spreads share a texture.

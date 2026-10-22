@@ -135,6 +135,8 @@ struct PageRecord: Codable, Identifiable, Equatable {
     var width: Int
     var height: Int
     var canvasBoundary: CanvasBoundary? = nil
+    var surface: PageSurface? = nil
+    var pageSurface: PageSurface { (surface ?? .normal).normalized }
     var boundary: CanvasBoundary { canvasBoundary ?? CanvasBoundary(width: width, height: height) }
     /// Nil for projects created before physical page settings were introduced.
     var comicLayout: ComicPageLayout? = nil
@@ -234,9 +236,9 @@ struct PageRecord: Codable, Identifiable, Equatable {
                       width: Int = CanvasConstants.defaultWidth,
                       height: Int = CanvasConstants.defaultHeight,
                       comicLayout: ComicPageLayout? = nil,
-                      isSpread: Bool = false, boundary: CanvasBoundary? = nil) -> PageRecord {
+                      isSpread: Bool = false, boundary: CanvasBoundary? = nil, surface: PageSurface = .normal) -> PageRecord {
         PageRecord(name: name, width: width,
-                   height: height, canvasBoundary: boundary, comicLayout: comicLayout, isSpread: isSpread,
+                   height: height, canvasBoundary: boundary, surface: surface.normalized, comicLayout: comicLayout, isSpread: isSpread,
                    layers: [LayerRecord(name: L10n.text("背景"), kind: .solidColor, isLocked: true, solidColor: .white),
                             LayerRecord(name: L10n.text("图层 1"))])
     }
@@ -244,7 +246,7 @@ struct PageRecord: Codable, Identifiable, Equatable {
 
 extension PageRecord {
     private enum CodingKeys: String, CodingKey {
-        case id, name, width, height, canvasBoundary, comicLayout, isSpread, backgroundSchemaVersion, layers
+        case id, name, width, height, canvasBoundary, surface, comicLayout, isSpread, backgroundSchemaVersion, layers
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -253,6 +255,7 @@ extension PageRecord {
         width = try values.decode(Int.self, forKey: .width)
         height = try values.decode(Int.self, forKey: .height)
         canvasBoundary = try values.decodeIfPresent(CanvasBoundary.self, forKey: .canvasBoundary)
+        surface = try values.decodeIfPresent(PageSurface.self, forKey: .surface)
         comicLayout = try values.decodeIfPresent(ComicPageLayout.self, forKey: .comicLayout)
         isSpread = try values.decodeIfPresent(Bool.self, forKey: .isSpread)
         backgroundSchemaVersion = try values.decodeIfPresent(Int.self, forKey: .backgroundSchemaVersion)
@@ -409,6 +412,7 @@ struct ClearLayerCommand: Codable {
 }
 
 enum EditCommand: Codable {
+    case setPageSurface(PageSurface)
     case clearLayer(ClearLayerCommand)
     case lassoFill(LassoFillCommand)
     case bucketFill(BucketFillCommand)

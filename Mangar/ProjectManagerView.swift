@@ -15,6 +15,9 @@ struct ProjectManagerView: View {
 
     @State private var showingAppMenu = false
     @State private var purpose: ProjectPurpose = .book
+    @State private var surfaceKind: PageSurfaceKind = .normal
+    @State private var sphereRadius = "1024"
+    @State private var surfaceOutsideFill: SphereOutsideFill = .transparent
     @State private var unlimitedWidth = false
     @State private var unlimitedHeight = true
     @State private var startsAtZeroX = true
@@ -390,6 +393,7 @@ struct ProjectManagerView: View {
                     field(L10n.text("项目名称"), value: $name)
                     unrestrictedAxis(L10n.text("canvas.axis.x"), value: $pixelWidth, unlimited: $unlimitedWidth, startsAtZero: $startsAtZeroX)
                     unrestrictedAxis(L10n.text("canvas.axis.y"), value: $pixelHeight, unlimited: $unlimitedHeight, startsAtZero: $startsAtZeroY)
+                    PageSurfaceControls(kind: $surfaceKind, radius: $sphereRadius, outsideFill: $surfaceOutsideFill)
                     field(L10n.text("初始页数"), value: $pageCount, numeric: true)
                 }
                 HStack {
@@ -423,9 +427,12 @@ struct ProjectManagerView: View {
         let w = Int(pixelWidth), h = Int(pixelHeight)
         guard unlimitedWidth || (w.map { (-1_000_000_000...1_000_000_000).contains($0) && (!startsAtZeroX || $0 > 0) } ?? false),
               unlimitedHeight || (h.map { (-1_000_000_000...1_000_000_000).contains($0) && (!startsAtZeroY || $0 > 0) } ?? false) else { return nil }
+        let sphere = surfaceKind == .sphere
+        let radius = Double(sphereRadius)
+        guard !sphere || (radius.map { $0.isFinite && (1...1_000_000_000).contains($0) } ?? false) else { return nil }
         return ProjectCreation(name: title, purpose: purpose,
             boundary: CanvasBoundary(width: unlimitedWidth ? nil : w, height: unlimitedHeight ? nil : h, startsAtZeroX: startsAtZeroX, startsAtZeroY: startsAtZeroY),
-            layout: nil, pageCount: count, startingSide: .right)
+            layout: nil, pageCount: count, startingSide: .right, surface: sphere ? PageSurface(kind: .sphere,radius: radius!,outsideFill: surfaceOutsideFill) : .normal)
     }
     private func rangeChoice(_ left: String, _ right: String, rightSelected: Binding<Bool>) -> some View {
         HStack(spacing:0) {

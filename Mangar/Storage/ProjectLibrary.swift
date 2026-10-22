@@ -60,7 +60,7 @@ struct ProjectLibrary {
         let store = ProjectStore(root: root)
         let width = layout?.canvasWidthPixels ?? Int(request.boundary.initialRect.width)
         let height = layout?.canvasHeightPixels ?? Int(request.boundary.initialRect.height)
-        let first = PageRecord.blank(width: width, height: height, comicLayout: layout, boundary: request.boundary)
+        let first = PageRecord.blank(width: width, height: height, comicLayout: layout, boundary: request.boundary, surface: request.surface)
         var manifest = ProjectManifest(name: name, pageIDs: [first.id], selectedPageID: first.id,
                                        startingSide: startingSide, singlePageLayout: layout, purpose: request.purpose,
                                        pageStructure: request.purpose == .book ? .bookSpreads : .cards, initialBoundary: request.boundary)
@@ -77,7 +77,7 @@ struct ProjectLibrary {
             if pageCount > 1 {
                 for number in 2...pageCount {
                     let page = PageRecord.blank(name: L10n.format("第 %@ 页", "\(number)"), width: width,
-                                                height: height, comicLayout: layout, boundary: request.boundary)
+                                                height: height, comicLayout: layout, boundary: request.boundary, surface: request.surface)
                     manifest.pageIDs.append(page.id)
                     try store.save(manifest: manifest, page: page,
                                    changedTiles: [:], allTileKeys: [], thumbnail: thumbnail)

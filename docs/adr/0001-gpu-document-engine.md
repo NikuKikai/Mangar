@@ -1,11 +1,13 @@
 # ADR 0001: GPU tile document engine
 
-- Status: Accepted for the first playable version
+- Status: Accepted for the initial implementation
 - Date: 2026-10-03
+
+This ADR records the initial architecture. Storage, residency and brush execution evolve in [ADR 0014](0014-unrestricted-canvas.md) and [ADR 0007](0007-brush-engine-v1.md); see the [documentation index](../README.md) for subsequent decisions.
 
 ## Context
 
-Mangar is an iPad manga painting app for private use. Its first playable version needs a canvas, raster layers, a round brush, undo/redo, and reliable project persistence. The document model must later support page lists, panel folders with clipping masks, brush assets, and shader based tone effects.
+Mangar is an iPad manga painting application. The initial implementation requires a canvas, raster layers, a round brush, undo/redo, and reliable project persistence. The document model must later support page lists, panel folders with clipping masks, brush assets, and shader based tone effects.
 
 Large pages and many layers make one full-size bitmap per layer impractical. Input, brush execution, and compositing must be responsive on devices with different memory budgets. A modal operation must preview without changing committed document pixels.
 

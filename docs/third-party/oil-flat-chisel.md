@@ -4,7 +4,7 @@
 - Source: https://www.davidrevoy.com/article1060/krita-brushes-2025-01-bundle
 - Download: https://www.peppercarrot.com/extras/resources/deevad-bundle_25.01.zip
 - Original file: `Deevad_25.01.bundle/brushes/chisel_streaks.png`
-- Included unchanged as: `Mangar/Brushes/Presets/Assets/oil-flat-chisel.png` (150 × 150 PNG)
+- Included unchanged as: [oil-flat-chisel.png](../../Mangar/Brushes/Presets/Assets/oil-flat-chisel.png) (150 × 150 PNG)
 - License: CC0 1.0 Universal / Public Domain, https://creativecommons.org/publicdomain/zero/1.0/legalcode
 - Permission: the author's License section explicitly allows inclusion in software; bundle metadata also declares CC-0.
 - Downloaded: 2026-10-09

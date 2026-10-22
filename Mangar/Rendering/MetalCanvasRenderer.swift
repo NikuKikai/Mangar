@@ -100,6 +100,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     private var groupTargets: [Int: MTLTexture] = [:]
     private let tilePipeline: MTLRenderPipelineState
     private let facingPagePipeline: MTLRenderPipelineState
+    private let reversePagePipeline: MTLRenderPipelineState
     private let shapePipeline: MTLRenderPipelineState
     private let checkerPipeline: MTLRenderPipelineState
     private let selectionTintPipeline: MTLRenderPipelineState
@@ -126,15 +127,20 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     var showsFacingPage = true { didSet { view?.setNeedsDisplay() } }
     var facingPageOpacity: Double = 1 { didSet { view?.setNeedsDisplay() } }
 
-    func setFacingPageImage(ownerID: UUID, rect: CGRect, image: CGImage) throws {
-        let texture = try MTKTextureLoader(device: device).newTexture(cgImage: image, options: [
-            .SRGB: false, .origin: MTKTextureLoader.Origin.topLeft.rawValue,
-            .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue)
-        ])
-        facingPageImage = (ownerID, rect, texture)
-        view?.setNeedsDisplay()
+    private var reversePageImages: (ownerID: UUID, images: [PageReferenceTexture])?
+    var showsReversePage = true { didSet { view?.setNeedsDisplay() } }
+    var showsReversePageMask = false { didSet { view?.setNeedsDisplay() } }
+    func setFacingPageTexture(ownerID: UUID, rect: CGRect, texture: MTLTexture) {
+        facingPageImage = (ownerID,rect,texture); view?.setNeedsDisplay()
     }
-    func clearFacingPageImage() { facingPageImage = nil; view?.setNeedsDisplay() }
+    func setReversePageTextures(ownerID: UUID, images: [PageReferenceTexture]) {
+        reversePageImages = (ownerID,images); view?.setNeedsDisplay()
+    }
+    func clearPageReferences() { facingPageImage=nil; reversePageImages=nil; view?.setNeedsDisplay() }
+    func reversePageSelection() throws -> SelectionCommand {
+        guard let images=reversePageImages, images.ownerID == page.id else { return .coverage([]) }
+        return .coverage(try PageReferenceCoverage.capture(images.images,device:device,boundary:page.boundary))
+    }
 
     weak var view: MTKView?
     var showsSelectionTint = false {
@@ -253,6 +259,8 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         self.tilePipeline = try device.makeRenderPipelineState(descriptor: tileDescriptor)
         tileDescriptor.fragmentFunction = facingPageFragment
         self.facingPagePipeline = try device.makeRenderPipelineState(descriptor: tileDescriptor)
+        tileDescriptor.fragmentFunction = library.makeFunction(name: "reversePageFragment")
+        self.reversePagePipeline = try device.makeRenderPipelineState(descriptor: tileDescriptor)
 
         let compositeDescriptor = MTLRenderPipelineDescriptor()
         compositeDescriptor.vertexFunction = vertex
@@ -756,6 +764,24 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
     func applySelection(_ command: SelectionCommand) {
         clearSelectionPreview()
         switch command {
+        case .coverage(let coverage):
+            var tiles: [SelectionTileKey: MTLTexture] = [:]
+            var bounds: [SelectionTileKey: CGRect] = [:]
+            var full = Set<SelectionTileKey>()
+            do {
+                for tile in coverage {
+                    let key = SelectionTileKey(x:tile.x,y:tile.y)
+                    bounds[key] = CGRect(x:tile.bounds.x,y:tile.bounds.y,width:tile.bounds.width,height:tile.bounds.height)
+                    if let encoded=tile.pixels {
+                        let data=try TileCodec.decode(encoded)
+                        guard data.count == 65536 else { throw TileCodec.CodecError.invalidTile }
+                        let texture=Self.makeMaskTile(device:device,fill:0)
+                        data.withUnsafeBytes { texture.replace(region:MTLRegionMake2D(0,0,256,256),mipmapLevel:0,withBytes:$0.baseAddress!,bytesPerRow:256) }
+                        tiles[key]=texture
+                    } else { full.insert(key) }
+                }
+                selection=SelectionSnapshot(defaultCoverage:0,tiles:tiles,tileBounds:bounds,bounds:.null,outlineKeys:[],fullKeys:full)
+            } catch { onStorageError?(error) }
         case .clear:
             selection = nil
         case .selectAll:
@@ -1122,6 +1148,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             encoder.setVertexBytes(&paper, length: MemoryLayout<QuadUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         }
+        if includeChecker { drawReversePages(encoder:encoder,viewport:vp,zoom:zoom,rotation:rotation,pan:pan) }
         if inspectingSelection {
             drawSelectionOutline(encoder: encoder, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
             drawPageGuides(encoder: encoder, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
@@ -1167,6 +1194,20 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
             drawFacingPage(encoder: encoder, viewport: vp, zoom: zoom, rotation: rotation, pan: pan)
         }
         encoder.endEncoding()
+    }
+
+    private func drawReversePages(encoder: MTLRenderCommandEncoder, viewport: SIMD2<Float>,
+                                  zoom: Float, rotation: Float, pan: SIMD2<Float>) {
+        guard showsReversePage, let references=reversePageImages,references.ownerID == page.id else { return }
+        encoder.setRenderPipelineState(reversePagePipeline)
+        for image in references.images {
+            var quad=worldQuad(image.rect,viewport:viewport,zoom:zoom,rotation:rotation,pan:pan)
+            var settings=SIMD4<Float>(image.uv.x,image.uv.y,showsReversePageMask ? 1 : 0,0)
+            encoder.setVertexBytes(&quad,length:MemoryLayout<QuadUniforms>.stride,index:0)
+            encoder.setFragmentBytes(&settings,length:16,index:0)
+            encoder.setFragmentTexture(image.texture,index:0)
+            encoder.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:6)
+        }
     }
 
     private func drawFacingPage(encoder: MTLRenderCommandEncoder, viewport: SIMD2<Float>,
@@ -1736,7 +1777,7 @@ final class MetalCanvasRenderer: NSObject, MTKViewDelegate {
         pass.colorAttachments[0].texture = texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 1, 1, 1)
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
         render(pass: pass, commandBuffer: command, viewport: CGSize(width: width, height: height),
                zoom: Float(scale), rotation: 0, includeChecker: false, pan: .zero,
                origin: SIMD2(bounds.minX, bounds.minY))

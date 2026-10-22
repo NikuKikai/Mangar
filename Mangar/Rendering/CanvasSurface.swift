@@ -48,8 +48,6 @@ final class CanvasSurface: MTKView {
     private var brushSizeTouch: UITouch?
     private var brushSizeDrag: BrushSizeDrag?
     private var fingerTouches: [UITouch] = []
-    private var panStartPoint: CGPoint = .zero
-    private var panStartOffset: CGPoint = .zero
     private var transformStart: TwoFingerTransform?
 
     private var historyTap: HistoryTap?
@@ -440,10 +438,6 @@ final class CanvasSurface: MTKView {
                 angle: atan2(second.y - first.y, second.x - first.x),
                 zoom: renderer.zoom, rotation: renderer.rotation,
                 canvasAnchor: renderer.canvasPoint(from: center))
-        } else if let finger = fingerTouches.first {
-            transformStart = nil
-            panStartPoint = finger.location(in: self)
-            panStartOffset = renderer.pan
         } else {
             transformStart = nil
         }
@@ -461,10 +455,6 @@ final class CanvasSurface: MTKView {
             renderer.rotation = start.rotation + angle - start.angle
             let mapped = renderer.rotatedScaledPoint(start.canvasAnchor)
             renderer.pan = CGPoint(x: center.x - mapped.x, y: center.y - mapped.y)
-        } else if let finger = fingerTouches.first {
-            let point = finger.location(in: self)
-            renderer.pan = CGPoint(x: panStartOffset.x + point.x - panStartPoint.x,
-                                   y: panStartOffset.y + point.y - panStartPoint.y)
         }
         refreshBrushCursor()
         setNeedsDisplay()

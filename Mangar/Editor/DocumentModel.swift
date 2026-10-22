@@ -363,7 +363,16 @@ struct LassoFillCommand: Codable {
     var erases: Bool = false
 }
 
+struct SelectionCoverageTile: Codable {
+    var x: Int
+    var y: Int
+    var bounds: SelectionRect
+    /// nil denotes a completely opaque tile.
+    var pixels: Data?
+}
+
 enum SelectionCommand: Codable {
+    case coverage([SelectionCoverageTile])
     case lasso([SelectionPoint], SelectionCombineMode)
     case rectangle(SelectionRect, SelectionCombineMode)
     case selectAll

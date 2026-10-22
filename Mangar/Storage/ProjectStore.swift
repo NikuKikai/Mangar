@@ -95,6 +95,25 @@ struct ProjectStore {
         return state.page
     }
 
+    /// Metadata-only cache lookup, including the signed extent of unbounded pages.
+    func previewBounds(_ id: UUID, region: PageRenderRegion) throws -> CGRect {
+        let state=try JSONDecoder().decode(PageState.self,from:Data(contentsOf:pageDirectory(id).appendingPathComponent("state.json")))
+        guard (2...4).contains(state.version) else { throw StoreError.unsupportedVersion }
+        let page=state.page
+        if region == .content { return page.contentRect }
+        if let finite=page.boundary.finiteRect { return finite }
+        let content=state.tileFiles.keys.compactMap { name -> CGRect? in
+            guard let key=tileKey(name),key.target == .content else { return nil }
+            return state.tileBounds?[name] ?? CGRect(x:key.x*256,y:key.y*256,width:256,height:256)
+        }.reduce(CGRect.null) { $0.union($1) }
+        let bounds=content.isNull ? page.boundary.initialRect : content.integral
+        let x0=page.boundary.hasMinimumX ? 0 : bounds.minX
+        let y0=page.boundary.hasMinimumY ? 0 : bounds.minY
+        let x1=page.boundary.width.map(CGFloat.init) ?? bounds.maxX
+        let y1=page.boundary.height.map(CGFloat.init) ?? bounds.maxY
+        return CGRect(x:x0,y:y0,width:x1-x0,height:y1-y0)
+    }
+
     func loadPageIndex(_ id: UUID) throws -> (PageRecord, CanvasTileArchive) {
         let directory = pageDirectory(id)
         let state = try JSONDecoder().decode(PageState.self, from: Data(contentsOf: directory.appendingPathComponent("state.json")))

@@ -39,19 +39,28 @@ final class BookPreviewController: ObservableObject {
             guard let self else { return }
             loading=true; error=nil; ready=[]
             let indices=[opening,opening+1,opening-1].filter { $0 >= 0 && $0 < self.count }
-            let ids=Set(indices.flatMap { [self.renderer.layout.openings[$0].left.source,self.renderer.layout.openings[$0].right.source].compactMap { $0 } })
+            let layout=renderer.layout
+            @MainActor func dependencies(_ index:Int)->[UUID] {
+                [layout.openings[index].left,layout.openings[index].right,
+                 layout.reverseFace(opening:index,left:true),layout.reverseFace(opening:index,left:false)].compactMap(\.source)
+            }
+            let far=Array(max(0,opening-10)...min(count-1,opening+10))
+            let ids=Set(far.flatMap(dependencies))
             renderer.images=renderer.images.filter { ids.contains($0.key) }
             defer { if !Task.isCancelled { loading=false } }
             do {
+                var loaded=Set<UUID>()
                 for index in indices {
-                    let faces=renderer.layout.openings[index]
-                    for id in [faces.left.source,faces.right.source].compactMap({ $0 }) {
-                        try Task.checkCancellation()
-                        await Task.yield()
-                        try Task.checkCancellation()
-                        renderer.images[id]=try source.texture(for: id)
+                    for id in dependencies(index) where !loaded.contains(id) {
+                        await Task.yield();try Task.checkCancellation()
+                        renderer.images[id]=try source.texture(for:id)
+                        loaded.insert(id)
                     }
-                    ready.insert(index)
+                    ready.insert(index);renderer.view?.setNeedsDisplay()
+                }
+                for id in ids.subtracting(loaded) {
+                    await Task.yield();try Task.checkCancellation()
+                    renderer.images[id]=try source.texture(for:id,maxDimension:512)
                     renderer.view?.setNeedsDisplay()
                 }
             } catch is CancellationError { } catch { self.error=error.localizedDescription }

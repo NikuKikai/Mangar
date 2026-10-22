@@ -425,6 +425,7 @@ private struct EditorWorkspace: View {
         .onChange(of: workspaceView) { _, view in
             showPageModeMenu = false
             session.renderer.setViewportVisible(view == .canvas)
+            session.setReferenceViewActive(view == .canvas)
         }
         .alert("Mangar", isPresented: Binding(
             get: { session.message != nil },
@@ -849,8 +850,39 @@ private struct EditorWorkspace: View {
             if effectPanel == .tone { toneParameters }
             if effectPanel == .curves { LayerCurveParameters(session: session, close: { effectPanel = nil }) }
             layerList
+            if session.manifest.purpose == .book { reversePageControls }
         }
         .buttonStyle(ImmediateButtonStyle())
+    }
+
+    private var reversePageControls: some View {
+        HStack(spacing: 1) {
+            Text(L10n.text("反面")).font(.system(size:11,weight:.semibold))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Button { session.showsReversePage.toggle() } label: {
+                ControlSymbol(name: session.showsReversePage ? "eye" : "eye.slash")
+                    .compactIconTarget()
+            }
+            .background(session.showsReversePage ? Color.white.opacity(0.12) : .clear)
+            .help(L10n.text("显示反面"))
+            Button { session.showsReversePageMask.toggle() } label: {
+                ControlSymbol(name: "circle.lefthalf.filled").compactIconTarget()
+            }
+            .foregroundStyle(session.showsReversePageMask ? Color(red:0.85,green:0.35,blue:0.72) : .secondary)
+            .background(session.showsReversePageMask ? Color.white.opacity(0.12) : .clear)
+            .help(L10n.text("反面着色"))
+            Button { session.selectReversePage() } label: {
+                ControlSymbol(name: "rectangle.dashed").compactIconTarget()
+            }
+            .help(L10n.text("从反面创建选区"))
+        }
+        .padding(.leading,4)
+        .padding(.trailing,16)
+        .frame(height:26)
+        .background(Color.white.opacity(0.035))
+        .overlay(alignment:.top) { Rectangle().fill(Color.black).frame(height:0.5) }
+        .disabled(!session.hasReversePage || session.referencesLoading)
     }
 
     private var layerControls: some View {

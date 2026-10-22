@@ -1,6 +1,6 @@
 import Foundation
 
-struct BookPageFace: Equatable {
+struct BookPageFace: Hashable {
     var source: UUID?
     /// Horizontal range within a trimmed source image; spreads share a texture.
     var u0: Float = 0
@@ -27,5 +27,36 @@ struct BookPreviewLayout {
             }
             return BookOpening(left: face(container.left), right: face(container.right))
         }
+    }
+}
+
+struct BookReverseFace: Hashable {
+    var front: BookPageFace
+    var reverse: BookPageFace
+}
+
+struct BookPageReferenceRequest: Hashable {
+    var ownerID: UUID
+    var facing: FacingPagePair?
+    var reverses: [BookReverseFace]
+}
+
+extension BookPreviewLayout {
+    func reverseFace(opening: Int, left: Bool) -> BookPageFace {
+        let index = opening + (left ? 1 : -1)
+        guard openings.indices.contains(index) else { return .blank }
+        return left ? openings[index].right : openings[index].left
+    }
+    func references(manifest: ProjectManifest, page: PageRecord) -> BookPageReferenceRequest? {
+        guard manifest.purpose == .book, manifest.pageStructure == .bookSpreads else { return nil }
+        var reverse: [BookReverseFace] = []
+        for (index, opening) in openings.enumerated() {
+            for (left,face) in [(true,opening.left),(false,opening.right)] where face.source == page.id {
+                let back = reverseFace(opening: index,left: left)
+                if back.source != nil { reverse.append(BookReverseFace(front: face,reverse: back)) }
+            }
+        }
+        return BookPageReferenceRequest(ownerID: page.id,
+            facing: FacingPagePair.resolve(manifest: manifest,page: page),reverses: reverse)
     }
 }

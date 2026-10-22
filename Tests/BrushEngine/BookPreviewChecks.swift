@@ -103,6 +103,7 @@ enum BookPreviewChecks {
             let pass=MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture=color; pass.colorAttachments[0].loadAction = .clear
             pass.colorAttachments[0].storeAction = .store
+            pass.colorAttachments[0].clearColor=MTLClearColorMake(0,0,0,0)
             pass.depthAttachment.texture=depth; pass.depthAttachment.loadAction = .clear
             pass.depthAttachment.clearDepth=1
             let command=queue.makeCommandBuffer()!
@@ -174,6 +175,27 @@ enum BookPreviewChecks {
             }}
         }
         print("PASS: binding stays opaque across both turn directions, extreme poses and curvature limits")
+        // No opaque placeholder may fill the silhouettes of real transparent
+        // pages, including a blank facing slot and the underlying paper stack.
+        let transparentManifest=ProjectManifest(pageIDs:[a,b,spread],selectedPageID:a)
+        renderer.layout=BookPreviewLayout(manifest:transparentManifest)
+        renderer.opening=0;renderer.pitch=0;renderer.yaw=0;renderer.gutterCurvature=0
+        renderer.images=[a:solid(0),b:solid(0),spread:solid(0x80800000)]
+        let backOnly=render(0)
+        precondition(abs(Int(backOnly[left+3])-128)<=1 && backOnly[left]>70)
+        precondition(backOnly[right+3] == 0)
+        renderer.images[b]=solid(0x80000080)
+        let mixed=render(0)
+        precondition(abs(Int(mixed[left+3])-192)<=2)
+        precondition(mixed[left+2]>70 && mixed[left]>30)
+        renderer.images=[a:solid(0),b:solid(0),spread:solid(0)]
+        let holes=render(0)
+        precondition(holes[left+3] == 0 && holes[right+3] == 0)
+        let nearTransparentEnd=render(0.99999)
+        renderer.opening=1
+        precondition(difference(nearTransparentEnd,render(0))<1.5)
+        print("PASS: transparent book silhouettes, continuous alpha, opposite-face color and transparent turn settlement")
+        renderer.layout=shifted;renderer.images=[:]
         renderer.opening=0; renderer.gutterCurvature=0.32
         if let path=ProcessInfo.processInfo.environment["MANGAR_PREVIEW_CHECK_IMAGE"] {
             renderer.yaw=0.28; renderer.pitch = -0.4

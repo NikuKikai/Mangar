@@ -59,22 +59,72 @@ final class EditorSession: ObservableObject {
         }
     }
     var facingPagePair: FacingPagePair? { FacingPagePair.resolve(manifest: manifest,page: page) }
-    private var loadedFacingPair: FacingPagePair?
+    var bookPageReferenceRequest: BookPageReferenceRequest? {
+        BookPreviewLayout(manifest:manifest).references(manifest:manifest,page:page)
+    }
+    @Published private(set) var referencesLoading = false
+    @Published var showsReversePage = UserDefaults.standard.object(forKey:"MangarShowsReversePage") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(showsReversePage,forKey:"MangarShowsReversePage");renderer.showsReversePage=showsReversePage }
+    }
+    @Published var showsReversePageMask = UserDefaults.standard.bool(forKey:"MangarShowsReversePageMask") {
+        didSet { UserDefaults.standard.set(showsReversePageMask,forKey:"MangarShowsReversePageMask");renderer.showsReversePageMask=showsReversePageMask }
+    }
+    var hasReversePage: Bool { !(bookPageReferenceRequest?.reverses.isEmpty ?? true) }
+    private var loadedReferences: BookPageReferenceRequest?
+    private var referenceTask: Task<Void,Never>?
+    private var referenceViewActive = true
 
-    func refreshFacingPagePreview() {
-        guard let pair = facingPagePair else {
-            loadedFacingPair = nil; renderer.clearFacingPageImage(); return
+    func setReferenceViewActive(_ active: Bool) {
+        referenceViewActive=active
+        if active { refreshBookPageReferences() }
+        else {
+            referenceTask?.cancel(); referenceTask=nil;loadedReferences=nil
+            referencesLoading=false;renderer.clearPageReferences()
         }
-        guard pair != loadedFacingPair else { return }
-        renderer.clearFacingPageImage()
-        do {
-            let partner = try store.pageRecord(pair.partnerID)
-            loadPageThumbnail(pair.partnerID)
-            guard let image = pageThumbnails[pair.partnerID]?.cgImage else { return }
-            try renderer.setFacingPageImage(ownerID: page.id,
-                rect: pair.destinationRect(current: page,partner: partner),image: image)
-            loadedFacingPair = pair
-        } catch { message = L10n.format("无法读取页面缩略图：%@", "\(error.localizedDescription)") }
+    }
+    func refreshBookPageReferences() {
+        guard referenceViewActive else { return }
+        let request=bookPageReferenceRequest
+        guard request != loadedReferences else { return }
+        referenceTask?.cancel();loadedReferences=request;renderer.clearPageReferences()
+        guard let request else { referencesLoading=false;return }
+        referencesLoading=true
+        referenceTask=Task { [weak self] in
+            guard let self else { return }
+            defer { if !Task.isCancelled { referencesLoading=false } }
+            do {
+                // References only address other pages; avoid snapshotting the
+                // active GPU document or interrupting a stroke during loading.
+                let source=DocumentPreviewSource(manifest:manifest,currentPage:page,store:store)
+                if let pair=request.facing {
+                    await Task.yield();try Task.checkCancellation()
+                    let partner=try source.pageRecord(for:pair.partnerID)
+                    let texture=try source.texture(for:pair.partnerID,region:.canvas,maxDimension:4096)
+                    renderer.setFacingPageTexture(ownerID:request.ownerID,
+                        rect:pair.destinationRect(current:page,partner:partner),texture:texture)
+                }
+                var images:[PageReferenceTexture]=[]
+                let rect=page.contentRect
+                for pair in request.reverses {
+                    await Task.yield();try Task.checkCancellation()
+                    guard let id=pair.reverse.source else { continue }
+                    let texture=try source.texture(for:id,maxDimension:4096)
+                    let area=CGRect(x:rect.minX+rect.width*Double(pair.front.u0),y:rect.minY,
+                        width:rect.width*Double(pair.front.u1-pair.front.u0),height:rect.height)
+                    images.append(PageReferenceTexture(rect:area,texture:texture,uv:SIMD2(pair.reverse.u1,pair.reverse.u0)))
+                }
+                try Task.checkCancellation()
+                guard page.id == request.ownerID else { return }
+                renderer.setReversePageTextures(ownerID:request.ownerID,images:images)
+            } catch is CancellationError { } catch {
+                loadedReferences=nil;message=error.localizedDescription
+            }
+        }
+    }
+    func selectReversePage() {
+        guard hasReversePage,!referencesLoading else { return }
+        do { changeSelection(try renderer.reversePageSelection()) }
+        catch { message=error.localizedDescription }
     }
 
     let renderer: MetalCanvasRenderer
@@ -84,8 +134,9 @@ final class EditorSession: ObservableObject {
         endStroke()
         endLayerPropertyEdit()
         releaseModifiers()
+        let archive = needsSave || !renderer.dirtyTileKeys.isEmpty ? try renderer.checkpointArchive() : nil
         return DocumentPreviewSource(manifest: manifest, currentPage: page,
-            currentArchive: try renderer.checkpointArchive(), store: store)
+            currentArchive: archive, store: store)
     }
     private var history: CommandHistory
     private let inkClock = ContinuousInkClock()
@@ -116,6 +167,8 @@ final class EditorSession: ObservableObject {
                                                                       archive: initialTiles))
         renderer.showsFacingPage = showsFacingPage
         renderer.facingPageOpacity = facingPageOpacity
+        renderer.showsReversePage = showsReversePage
+        renderer.showsReversePageMask = showsReversePageMask
         renderer.onViewportChanged = { [weak self] in self?.viewportRevision += 1 }
         renderer.onContentChanged = { [weak self] in self?.contentRevision += 1 }
         renderer.onStorageError = { [weak self] error in self?.message = error.localizedDescription }
@@ -1069,7 +1122,10 @@ final class EditorSession: ObservableObject {
     private func persist() -> Bool {
         do {
             if !needsSave && renderer.dirtyTileKeys.isEmpty &&
-                !store.requiresFullSnapshot(page.id) && store.hasThumbnail { return true }
+                !store.requiresFullSnapshot(page.id) && store.hasThumbnail {
+                PageRenderCacheBuilder.shared.schedule(store:store,pageID:page.id)
+                return true
+            }
             renderer.prepareForReadback()
             let allKeys = renderer.tileKeys
             let keys = store.requiresFullSnapshot(page.id) ? allKeys : renderer.dirtyTileKeys
@@ -1081,6 +1137,7 @@ final class EditorSession: ObservableObject {
             pageThumbnails[page.id] = UIImage(data: thumbnail)
             renderer.clearSavedDirtyTiles()
             needsSave = false
+            PageRenderCacheBuilder.shared.schedule(store:store,pageID:page.id)
             return true
         } catch {
             message = L10n.format("保存失败：%@", "\(error.localizedDescription)")

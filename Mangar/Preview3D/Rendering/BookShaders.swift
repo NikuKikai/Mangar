@@ -51,9 +51,10 @@ enum BookShaders {
         o.uv=s.uv; o.normal=s.normal; o.lightPosition=lightPosition(s.position,u);
         return o;
     }
-    vertex float4 bookShadowVertex(uint id [[vertex_id]], const device float2 *grid [[buffer(0)]],
+    struct ShadowOut { float4 position [[position]]; float2 uv; };
+    vertex ShadowOut bookShadowVertex(uint id [[vertex_id]], const device float2 *grid [[buffer(0)]],
                                   constant Uniforms &u [[buffer(1)]]) {
-        return lightPosition(bookSurface(grid[id],u).position,u);
+        ShadowOut o; o.position=lightPosition(bookSurface(grid[id],u).position,u);o.uv=grid[id];return o;
     }
     struct SpineVertex { float4 position; float4 normal; };
     Surface spineSurface(SpineVertex input, constant Uniforms &u) {
@@ -78,17 +79,31 @@ enum BookShaders {
                                        constant Uniforms &u [[buffer(1)]]) {
         return lightPosition(spineSurface(vertices[id],u).position,u);
     }
+    float4 pageColor(float2 uv, bool facing, constant Uniforms &u,
+        texture2d<float> front,texture2d<float> back) {
+        constexpr sampler s(filter::linear,mip_filter::linear,address::clamp_to_edge);
+        float x=u.paper.x < 0 ? 1-uv.x : uv.x;
+        float4 a=front.sample(s,float2(mix(u.frontUV.x,u.frontUV.y,x),uv.y));
+        float4 b=back.sample(s,float2(mix(u.backUV.x,u.backUV.y,1-x),uv.y));
+        return facing ? a+b*(1-a.a) : b+a*(1-b.a);
+    }
+    fragment void bookShadowFragment(ShadowOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
+        texture2d<float> front [[texture(0)]],texture2d<float> back [[texture(1)]]) {
+        float alpha=pageColor(in.uv,true,u,front,back).a;
+        // Ordered coverage preserves translucent shadows without making holes
+        // cast a rectangular shadow. PCF filters the coverage in the color pass.
+        uint2 p=uint2(in.position.xy);
+        uint bayer[16]={0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5};
+        if (alpha <= (float(bayer[(p.y%4)*4+p.x%4])+0.5)/16.0) discard_fragment();
+    }
     fragment float4 bookFragment(Out in [[stage_in]], constant Uniforms &u [[buffer(1)]],
                                 texture2d<float> front [[texture(0)]], texture2d<float> back [[texture(1)]],
                                 depth2d<float> shadow [[texture(2)]]) {
         constexpr sampler s(filter::linear,mip_filter::linear,address::clamp_to_edge);
         constexpr sampler comparison(coord::normalized,filter::linear,address::clamp_to_edge,compare_func::less_equal);
         bool facing=in.normal.z >= 0;
-        float x=u.paper.x < 0 ? 1-in.uv.x : in.uv.x;
-        if (!facing) x=1-x;
-        float4 region=facing ? u.frontUV : u.backUV;
-        float2 uv=float2(mix(region.x,region.y,x),in.uv.y);
-        float4 c=facing ? front.sample(s,uv) : back.sample(s,uv);
+        float4 c=pageColor(in.uv,facing,u,front,back);
+        if (c.a < 0.0001) discard_fragment();
         float3 n=normalize(facing ? in.normal : -in.normal);
         float diffuse=max(0.0,dot(n,lightDirection()));
         float2 shadowUV=in.lightPosition.xy*float2(0.5,-0.5)+0.5;
@@ -107,7 +122,7 @@ enum BookShaders {
         }
         visibility/=9;
         float light=0.30+0.70*diffuse*visibility;
-        return float4((c.rgb+(1-c.a))*light*u.stack.z,1);
+        return float4(c.rgb*light*u.stack.z,c.a);
     }
     """
 }

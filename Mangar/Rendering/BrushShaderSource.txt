@@ -126,6 +126,14 @@ fragment float4 facingPageFragment(QuadOutput in [[stage_in]],
     return image.sample(s, in.uv) * opacity;
 }
 
+// Display-only reverse image, with an optional alpha-preserving tint.
+fragment float4 reversePageFragment(QuadOutput in [[stage_in]],
+    texture2d<float> image [[texture(0)]], constant float4 &settings [[buffer(0)]]) {
+    constexpr sampler s(coord::normalized,address::clamp_to_edge,filter::linear);
+    float4 c=image.sample(s,float2(mix(settings.x,settings.y,in.uv.x),in.uv.y));
+    return settings.z > 0 ? float4(float3(0.85,0.35,0.72)*c.a,c.a) : c;
+}
+
 fragment float4 shapeFragment(QuadOutput in [[stage_in]], constant float4 &color [[buffer(0)]]) {
     if (any(in.canvasPosition < in.bounds.xy) || any(in.canvasPosition >= in.bounds.zw)) discard_fragment();
     return color;

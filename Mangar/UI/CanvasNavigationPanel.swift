@@ -68,7 +68,7 @@ struct CanvasNavigationPanel: View {
         }
         .buttonStyle(ImmediateButtonStyle())
         .background(Color(red:0.15,green:0.16,blue:0.17))
-        .task(id: session.facingPagePair) { session.refreshFacingPagePreview() }
+        .task(id: session.bookPageReferenceRequest) { session.refreshBookPageReferences() }
         .task(id:revision) {
             do {
                 session.renderer.prepareForReadback()

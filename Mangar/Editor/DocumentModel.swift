@@ -78,6 +78,8 @@ struct LayerRecord: Codable, Identifiable, Equatable {
     var parentID: UUID? = nil
     var isVisible: Bool = true
     var opacity: Double = 1
+    var z: Int = 0
+    var isParallaxEnabled: Bool = false
     var blendMode: LayerBlendMode = .normal
     var tone: LayerToneEffect? = nil
     var curves: LayerCurveEffect? = nil
@@ -90,7 +92,7 @@ struct LayerRecord: Codable, Identifiable, Equatable {
 
 extension LayerRecord {
     private enum CodingKeys: String, CodingKey {
-        case id, name, kind, parentID, isVisible, opacity, blendMode, tone, curves, hasMask, isLocked, shape, solidColor, solidBounds
+        case id, name, kind, parentID, isVisible, opacity, z, isParallaxEnabled, blendMode, tone, curves, hasMask, isLocked, shape, solidColor, solidBounds
     }
 
     private enum LegacyKeys: String, CodingKey { case paperBounds }
@@ -106,6 +108,8 @@ extension LayerRecord {
         parentID = try values.decodeIfPresent(UUID.self, forKey: .parentID)
         isVisible = try values.decode(Bool.self, forKey: .isVisible)
         opacity = try values.decode(Double.self, forKey: .opacity)
+        z = min(99,max(-99,try values.decodeIfPresent(Int.self,forKey:.z) ?? 0))
+        isParallaxEnabled = try values.decodeIfPresent(Bool.self,forKey:.isParallaxEnabled) ?? (z != 0)
         blendMode = try values.decodeIfPresent(LayerBlendMode.self, forKey: .blendMode) ?? .normal
         tone = try values.decodeIfPresent(LayerToneEffect.self, forKey: .tone)
         curves = try values.decodeIfPresent(LayerCurveEffect.self, forKey: .curves)
@@ -356,6 +360,7 @@ struct SelectionPoint: Codable {
 }
 
 struct LassoFillCommand: Codable {
+    var canvasOffset: CGPoint = .zero
     var layerID: UUID
     var points: [SelectionPoint]
     var brush: BrushConfiguration
@@ -403,6 +408,7 @@ enum EditorModifier: String, CaseIterable, Hashable {
 }
 
 struct StrokeCommand: Codable {
+    var canvasOffset: CGPoint = .zero
     var tipAssets: [BrushTipAsset]? = nil
     var resourceRevision: String? = nil
     var id: UUID = UUID()
@@ -416,6 +422,7 @@ struct StrokeCommand: Codable {
 }
 
 struct ClearLayerCommand: Codable {
+    var canvasOffset: CGPoint = .zero
     var layerID: UUID
     var target: LayerEditTarget
 }

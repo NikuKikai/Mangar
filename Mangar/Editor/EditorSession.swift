@@ -58,6 +58,28 @@ final class EditorSession: ObservableObject {
             renderer.facingPageOpacity = facingPageOpacity
         }
     }
+    var supportsParallax:Bool { manifest.purpose == .unrestricted && page.pageSurface.kind == .normal }
+    var selectedParallaxEnabled:Bool { !selectedLayers.isEmpty && selectedLayers.allSatisfy(\.isParallaxEnabled) }
+    var selectedEffectiveZ:Int { selectedLayer.map { $0.isParallaxEnabled ? $0.z : 0 } ?? 0 }
+    func changeSelectedParallax(on:Bool,z value:Double) {
+        let z=min(99,max(-99,Int(value.rounded())))
+        if layerPropertyOriginal != nil {
+            previewLayerProperties { $0.isParallaxEnabled=on;$0.z=z }
+        } else {
+            guard !selectedLayerIDs.isEmpty else { return }
+            endStroke()
+            var layers=page.layers
+            for index in layers.indices where selectedLayerIDs.contains(layers[index].id) {
+                layers[index].isParallaxEnabled=on
+            }
+            if layers != page.layers { perform(.replaceLayerStack(layers)) }
+        }
+    }
+    func previewLayerZ(_ value:Double) {
+        let z=min(99,max(-99,Int(value.rounded())))
+        previewLayerProperties { $0.z=z }
+    }
+
     var facingPagePair: FacingPagePair? { FacingPagePair.resolve(manifest: manifest,page: page) }
     var bookPageReferenceRequest: BookPageReferenceRequest? {
         BookPreviewLayout(manifest:manifest).references(manifest:manifest,page:page)
@@ -156,7 +178,7 @@ final class EditorSession: ObservableObject {
     init(projectURL: URL) throws {
         let store = ProjectStore(root: projectURL)
         let (manifest, initialPage, initialTiles) = try store.loadIndex()
-        let renderer = try MetalCanvasRenderer(page: initialPage)
+        let renderer = try MetalCanvasRenderer(page: initialPage,supportsParallax:manifest.purpose == .unrestricted)
         try renderer.restore(initialTiles)
         self.store = store
         self.page = initialPage
@@ -323,7 +345,7 @@ final class EditorSession: ObservableObject {
         let assets: [BrushTipAsset]
         do { assets = try BrushResourceStore.shared.assets(for: configuration) }
         catch { message = error.localizedDescription; return }
-        activeStroke = StrokeCommand(tipAssets: assets, resourceRevision: BrushRecipe(configuration).revision, definition: definition, layerID: selectedLayerID,
+        activeStroke = StrokeCommand(canvasOffset: renderer.layerOffset(selectedLayerID), tipAssets: assets, resourceRevision: BrushRecipe(configuration).revision, definition: definition, layerID: selectedLayerID,
             samples: [sample(point, pressure, time: 0, altitude: altitude, azimuth: azimuth)],
             brush: configuration, seed: UInt64.random(in: 1...UInt64.max),
             tool: usesTransparentColor ? .eraser : selectedTool, target: selectedEditTarget)
@@ -426,7 +448,7 @@ final class EditorSession: ObservableObject {
             guard path.count >= 3 else { return }
             if tool == .lassoFill, let fillLayerID, let fillBrush,
                page.isEffectivelyVisible(fillLayerID), !page.isEffectivelyLocked(fillLayerID) {
-                perform(.lassoFill(LassoFillCommand(layerID: fillLayerID, points: path, brush: fillBrush, target: fillTarget, erases: fillErases)))
+                perform(.lassoFill(LassoFillCommand(canvasOffset: renderer.layerOffset(fillLayerID), layerID: fillLayerID, points: path, brush: fillBrush, target: fillTarget, erases: fillErases)))
             } else if tool == .lassoSelection {
                 perform(.selection(.lasso(path, mode)))
             }
@@ -742,7 +764,7 @@ final class EditorSession: ObservableObject {
         endStroke()
         cancelSelection()
         endLayerPropertyEdit()
-        perform(.clearLayer(ClearLayerCommand(layerID: id, target: selectedEditTarget)))
+        perform(.clearLayer(ClearLayerCommand(canvasOffset: renderer.layerOffset(id), layerID: id, target: selectedEditTarget)))
     }
 
     private func canDeleteLayer(_ id: UUID) -> Bool {
@@ -988,7 +1010,7 @@ final class EditorSession: ObservableObject {
         // renderer so the open page, its history and viewport stay intact.
         do {
             let (record, tiles) = try store.loadPageIndex(id)
-            let thumbnailRenderer = try MetalCanvasRenderer(page: record)
+            let thumbnailRenderer = try MetalCanvasRenderer(page: record,supportsParallax:manifest.purpose == .unrestricted)
             try thumbnailRenderer.restore(tiles)
             let data = try thumbnailRenderer.projectThumbnailPNG()
             try store.savePageThumbnail(data, pageID: id)

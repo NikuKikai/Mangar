@@ -54,7 +54,10 @@ final class VerticalPropertyView: UIView, UIGestureRecognizerDelegate {
         super.init(frame: frame)
         title.font = .monospacedSystemFont(ofSize: 9, weight: .regular)
         title.textColor = UIColor.white.withAlphaComponent(0.65)
-        title.lineBreakMode = .byTruncatingTail
+        title.lineBreakMode = .byClipping
+        title.numberOfLines = 1
+        title.clipsToBounds = true
+        clipsToBounds = true
         title.textAlignment = .center
         title.isUserInteractionEnabled = false
         addSubview(title)
@@ -69,7 +72,7 @@ final class VerticalPropertyView: UIView, UIGestureRecognizerDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layoutSubviews() {
         super.layoutSubviews()
-        title.frame = bounds.insetBy(dx: 2, dy: 0)
+        title.frame = bounds
         refreshValueLevel()
     }
     private func refreshValueLevel() {

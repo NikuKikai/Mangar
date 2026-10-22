@@ -1,18 +1,37 @@
 import SwiftUI
 import UIKit
 
-/// Tap toggles; a vertical drag adjusts a normalized value without toggling on release.
+enum ScrubbableValueStyle {
+    case percentage
+    case integer(ClosedRange<Double>, pointsPerUnit:Double, prefix:String)
+    var range:ClosedRange<Double> { if case .integer(let range,_,_) = self { return range };return 0...1 }
+    var pointsPerUnit:Double { if case .integer(_,let points,_) = self { return points };return 200 }
+    var accessibilityStep:Double { if case .integer = self { return 1 };return 0.05 }
+    func clamped(_ value:Double)->Double {
+        let limited=min(range.upperBound,max(range.lowerBound,value))
+        if case .integer = self { return limited.rounded() };return limited
+    }
+    func text(_ value:Double)->String {
+        if case .integer(_,_,let prefix) = self { return LayerParallax.label(Int(value.rounded()),prefix:prefix) }
+        return "\(Int((value*100).rounded()))%"
+    }
+}
+
+/// Tap toggles; a vertical drag scrubs a typed value and commits one transaction.
 struct ScrubbableToggleButton: UIViewRepresentable {
     let icon: String
     let label: String
     let isOn: Bool
     let value: Double
+    var valueStyle:ScrubbableValueStyle = .percentage
+    var begin:(() -> Void)? = nil
+    var end:((Bool) -> Void)? = nil
     let change: (Bool, Double) -> Void
 
     func makeUIView(context: Context) -> ScrubbableToggleView { ScrubbableToggleView() }
     func updateUIView(_ view: ScrubbableToggleView,context: Context) {
         view.configure(icon: icon,label: label,isOn: isOn,value: value,
-                       enabled: context.environment.isEnabled,change: change)
+                       enabled: context.environment.isEnabled,valueStyle:valueStyle,begin:begin,end:end,change: change)
     }
     static func dismantleUIView(_ view: ScrubbableToggleView,coordinator: ()) { view.cancelTracking(with: nil) }
 }
@@ -22,6 +41,9 @@ final class ScrubbableToggleView: UIControl {
     private let feedback = ImmediatePressFeedbackLayer()
     private let valueLevel = ControlValueLevel()
     private var change: ((Bool,Double) -> Void)?
+    private var valueStyle:ScrubbableValueStyle = .percentage
+    private var onBegin:(() -> Void)?
+    private var onEnd:((Bool) -> Void)?
     private var value: Double = 1
     private var initialValue: Double = 1
     private var initialIsOn = false
@@ -38,9 +60,11 @@ final class ScrubbableToggleView: UIControl {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func configure(icon: String,label: String,isOn: Bool,value: Double,enabled: Bool,
+                   valueStyle:ScrubbableValueStyle,begin:(() -> Void)?,end:((Bool) -> Void)?,
                    change: @escaping (Bool,Double) -> Void) {
         if !enabled && interactionActive { cancelTracking(with: nil) }
         self.change = change; self.value = value
+        self.valueStyle=valueStyle;onBegin=begin;onEnd=end
         isEnabled = enabled; isSelected = isOn
         let artwork = ControlSymbolArtwork.metrics(for: icon)
         image.image = UIImage(systemName: icon,withConfiguration: UIImage.SymbolConfiguration(pointSize: artwork.pointSize,weight: .regular))
@@ -60,9 +84,9 @@ final class ScrubbableToggleView: UIControl {
     }
     override func continueTracking(_ touch: UITouch,with event: UIEvent?) -> Bool {
         let delta = touch.location(in: self).y - initialPoint.y
-        if abs(delta) >= 3 { scrubbing = true }
+        if abs(delta) >= 3 && !scrubbing { scrubbing = true;onBegin?() }
         if scrubbing {
-            apply(on: true,value: initialValue-Double(delta)/200)
+            apply(on: true,value: initialValue-Double(delta)/valueStyle.pointsPerUnit)
             showIndicator()
         } else { isHighlighted = bounds.contains(touch.location(in: self)); refreshAppearance() }
         return true
@@ -70,37 +94,39 @@ final class ScrubbableToggleView: UIControl {
     override func endTracking(_ touch: UITouch?,with event: UIEvent?) {
         guard interactionActive else { return }
         if scrubbing, let touch {
-            apply(on: true,value: initialValue-Double(touch.location(in: self).y-initialPoint.y)/200)
+            apply(on: true,value: initialValue-Double(touch.location(in: self).y-initialPoint.y)/valueStyle.pointsPerUnit)
         } else if let touch, bounds.contains(touch.location(in: self)) {
             apply(on: !initialIsOn,value: initialValue)
         }
-        finish()
+        finish(commit:true)
     }
     override func cancelTracking(with event: UIEvent?) {
         super.cancelTracking(with: event)
         if interactionActive && scrubbing { apply(on: initialIsOn,value: initialValue) }
-        finish()
+        finish(commit:false)
     }
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window == nil { cancelTracking(with: nil) }
     }
     private func apply(on: Bool,value: Double) {
-        let value = min(1,max(0,value))
+        let value = valueStyle.clamped(value)
         isSelected = on; self.value = value
         change?(on,value); refreshAppearance()
     }
-    private func finish() {
+    private func finish(commit:Bool) {
+        let wasScrubbing=scrubbing
         interactionActive = false; scrubbing = false; isHighlighted = false
         indicator?.removeFromSuperview(); indicator = nil
+        if wasScrubbing { onEnd?(commit) }
         refreshAppearance()
     }
     private func refreshAppearance() {
         alpha = isEnabled ? 1 : 0.35
         backgroundColor = isSelected ? UIColor.systemBlue.withAlphaComponent(0.08) : .clear
-        valueLevel.update(in: self,fraction: value,enabled: isEnabled,emphasized: isSelected)
+        valueLevel.update(in: self,fraction: ControlValueLevel.fraction(value,in:valueStyle.range),enabled: isEnabled,emphasized: isSelected)
         image.tintColor = isSelected ? .systemBlue : .white
-        accessibilityValue = "\(Int((value*100).rounded()))%"
+        accessibilityValue = valueStyle.text(value)
         accessibilityTraits = [.button,.adjustable]
         if isSelected { accessibilityTraits.insert(.selected) }
         if !isEnabled { accessibilityTraits.insert(.notEnabled) }
@@ -116,7 +142,7 @@ final class ScrubbableToggleView: UIControl {
             label.textAlignment = .center; label.isUserInteractionEnabled = false
             window.addSubview(label); indicator = label
         }
-        label.text = "\(Int((value*100).rounded()))%"
+        label.text = valueStyle.text(value)
         let anchor = convert(bounds,to: window), safe = window.bounds.inset(by: window.safeAreaInsets)
         label.frame = CGRect(x: min(safe.maxX-44,max(safe.minX,anchor.midX-22)),
                              y: max(safe.minY,anchor.minY-25),width: 44,height: 22)
@@ -125,6 +151,10 @@ final class ScrubbableToggleView: UIControl {
         guard isEnabled else { return false }
         apply(on: !isSelected,value: value); return true
     }
-    override func accessibilityIncrement() { if isEnabled { apply(on: true,value: value+0.05) } }
-    override func accessibilityDecrement() { if isEnabled { apply(on: true,value: value-0.05) } }
+    private func accessibilityScrub(_ direction:Double) {
+        guard isEnabled else { return }
+        onBegin?();apply(on:true,value:value+direction*valueStyle.accessibilityStep);onEnd?(true)
+    }
+    override func accessibilityIncrement() { accessibilityScrub(1) }
+    override func accessibilityDecrement() { accessibilityScrub(-1) }
 }

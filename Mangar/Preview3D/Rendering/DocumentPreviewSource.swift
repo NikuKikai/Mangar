@@ -22,7 +22,7 @@ final class DocumentPreviewSource {
     }
 
     func regionTexture(bounds: CGRect) throws -> MTLTexture {
-        if compositor == nil { compositor = try MetalCanvasRenderer(page: currentPage) }
+        if compositor == nil { compositor = try MetalCanvasRenderer(page: currentPage,supportsParallax:manifest.purpose == .unrestricted) }
         guard let compositor else { throw MetalCanvasRenderer.RendererError.exportFailed }
         if compositorPageID != currentPage.id {
             compositor.page = currentPage
@@ -54,7 +54,7 @@ final class DocumentPreviewSource {
         let page: PageRecord, archive: CanvasTileArchive
         if id == currentPage.id, let currentArchive { page=currentPage;archive=currentArchive }
         else { (page,archive)=try store.loadPageIndex(id) }
-        if compositor == nil { compositor = try MetalCanvasRenderer(page: page) }
+        if compositor == nil { compositor = try MetalCanvasRenderer(page: page,supportsParallax:manifest.purpose == .unrestricted) }
         guard let compositor else { throw MetalCanvasRenderer.RendererError.exportFailed }
         compositor.page = page
         try compositor.restore(archive)

@@ -12,6 +12,7 @@ nonisolated struct SelectionTileKey: Hashable, Sendable {
 struct SelectionSnapshot {
     private let raw: SelectionStorage
     var isInverted = false
+    var identity:ObjectIdentifier { ObjectIdentifier(raw) }
     var defaultCoverage: UInt8 { isInverted ? 255 - raw.defaultCoverage : raw.defaultCoverage }
     var fullKeys: Set<SelectionTileKey> { isInverted ? raw.zeroKeys : raw.fullKeys }
     var zeroKeys: Set<SelectionTileKey> { isInverted ? raw.fullKeys : raw.zeroKeys }

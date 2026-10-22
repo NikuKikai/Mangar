@@ -91,7 +91,7 @@ final class MetalBrushEngine {
     }
 
     func update(_ stroke: StrokeCommand, base: [TileKey: MTLTexture],
-                selection: SelectionSnapshot?, width: Int, height: Int, boundary: CanvasBoundary? = nil) -> Result {
+                selection: SelectionSnapshot?, width: Int, height: Int, boundary: CanvasBoundary? = nil, canvasOffset:CGPoint = .zero) -> Result {
         if transaction?.id != stroke.id {
             let state = device.makeBuffer(length: 96, options: .storageModeShared)!
             memset(state.contents(), 0, state.length)
@@ -121,7 +121,7 @@ final class MetalBrushEngine {
         var previous = initialPrevious
         for start in stride(from: 0, to: inputs.count, by: Self.batchSize) {
             let batch = Array(inputs[start..<min(inputs.count, start + Self.batchSize)])
-            let origin = SIMD2<Double>(floor(batch[0].x/256)*256, floor(batch[0].y/256)*256)
+            let origin = SIMD2<Double>(floor((batch[0].x-canvasOffset.x)/256)*256, floor((batch[0].y-canvasOffset.y)/256)*256)
             if origin != context.origin {
                 var delta = SIMD2<Float>(Float(context.origin.x-origin.x), Float(context.origin.y-origin.y))
                 let encoder = command.makeComputeCommandEncoder()!
@@ -130,16 +130,18 @@ final class MetalBrushEngine {
                 encoder.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
                 encoder.endEncoding(); context.origin = origin
             }
-            let gpuInputs = batch.map { BrushGPUInput($0, origin: origin) }
+            let gpuInputs = batch.map { BrushGPUInput($0, origin: origin+SIMD2(Double(canvasOffset.x),Double(canvasOffset.y))) }
             let inputBuffer = device.makeBuffer(bytes: gpuInputs, length: gpuInputs.count * MemoryLayout<BrushGPUInput>.stride)!
             let dabs = dabBuffer
             let count = dabCountBuffer
             var uniforms = context.compiled.uniforms
             uniforms.counts.x = UInt32(batch.count)
-            uniforms.clip = (boundary ?? CanvasBoundary(width: width, height: height)).gpuClip(relativeTo: origin)
+            uniforms.clip = (boundary ?? CanvasBoundary(width: width, height: height)).gpuClip(relativeTo: origin+SIMD2(Double(canvasOffset.x),Double(canvasOffset.y)))
             if uniforms.medium.x != 0 {
                 uniforms.pickupTiles = pickupWindow.encode(command: command,
-                    points: batch + (previous.map { [$0] } ?? []), base: context.pickupBase, layer: stroke.layerID,
+                    points: (batch + (previous.map { [$0] } ?? [])).map { sample in
+                        var p=sample;p.x-=canvasOffset.x;p.y-=canvasOffset.y;return p
+                    }, base: context.pickupBase, layer: stroke.layerID,
                     selection: context.selection, empty: emptyCanvas, fullSelection: fullSelection, emptySelection: emptySelection, origin: origin)
             }
             let generator = command.makeComputeCommandEncoder()!
@@ -159,13 +161,13 @@ final class MetalBrushEngine {
 
             let reach = context.compiled.maximumReach + 8
             let points = batch + (previous.map { [$0] } ?? [])
-            let bounds = CGRect(x: points.map(\.x).min()! - reach, y: points.map(\.y).min()! - reach,
+            let bounds = CGRect(x: points.map(\.x).min()! - canvasOffset.x - reach, y: points.map(\.y).min()! - canvasOffset.y - reach,
                                 width: points.map(\.x).max()! - points.map(\.x).min()! + reach * 2,
                                 height: points.map(\.y).max()! - points.map(\.y).min()! + reach * 2)
 
             previous = batch.last
             guard !bounds.isNull, !bounds.isEmpty else { continue }
-            var affected = (boundary ?? CanvasBoundary(width: width, height: height)).clip(bounds)
+            var affected = (boundary ?? CanvasBoundary(width: width, height: height)).clip(bounds.offsetBy(dx:canvasOffset.x,dy:canvasOffset.y)).offsetBy(dx:-canvasOffset.x,dy:-canvasOffset.y)
             if let selection = context.selection, selection.defaultCoverage == 0 {
                 affected = affected.intersection(selection.bounds)
             }
@@ -262,8 +264,8 @@ final class MetalBrushEngine {
     }
 
     func finish(_ stroke: StrokeCommand, base: [TileKey: MTLTexture], selection: SelectionSnapshot?,
-                width: Int, height: Int, boundary: CanvasBoundary? = nil) -> Result {
-        let output = update(stroke, base: base, selection: selection, width: width, height: height, boundary: boundary)
+                width: Int, height: Int, boundary: CanvasBoundary? = nil, canvasOffset:CGPoint = .zero) -> Result {
+        let output = update(stroke, base: base, selection: selection, width: width, height: height, boundary: boundary, canvasOffset:canvasOffset)
         transaction = nil
         return output
     }

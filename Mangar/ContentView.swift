@@ -952,6 +952,17 @@ private struct EditorWorkspace: View {
                 .accessibilityLabel(L10n.text("蓝色预览所选缩略图"))
                 .accessibilityValue(session.showsTargetTint ? L10n.text("已启用") : L10n.text("未启用"))
                 .accessibilityAddTraits(session.showsTargetTint ? .isSelected : [])
+                if session.supportsParallax {
+                    ScrubbableToggleButton(icon:"square.3.layers.3d",label:L10n.text("图层视差"),
+                        isOn:session.selectedParallaxEnabled,value:Double(session.selectedEffectiveZ),
+                        valueStyle:.integer(-99...99,pointsPerUnit:3,prefix:"z"),
+                        begin:{ if let id=session.selectedLayerID { session.beginLayerPropertyEdit(id) } },
+                        end:{ session.endLayerPropertyEdit(commit:$0) }) { on,value in
+                        session.changeSelectedParallax(on:on,z:value)
+                    }
+                    .compactIconTarget()
+                    .disabled(session.selectedLayerID == nil)
+                }
                 Spacer(minLength: 0)
             }
             .buttonStyle(ImmediateButtonStyle())
@@ -1153,6 +1164,14 @@ private struct EditorWorkspace: View {
                                     change: { session.previewLayerOpacity($0) },
                                     end: { session.endLayerPropertyEdit(commit: $0) })
                                 .frame(width: 28)
+                                if session.supportsParallax && layer.isParallaxEnabled {
+                                    VerticalDragProperty(text:LayerParallax.label(layer.z),label:L10n.text("图层 z"),
+                                        value:.number(Double(layer.z),-99...99,pointsPerUnit:3),
+                                        begin:{ session.beginLayerPropertyEdit(layer.id) },
+                                        change:{ session.previewLayerZ($0) },
+                                        end:{ session.endLayerPropertyEdit(commit:$0) })
+                                        .frame(width:26)
+                                }
                                 if layer.curves?.isEnabled == true {
                                     Image(systemName: "chart.xyaxis.line").font(.system(size: 9))
                                         .foregroundStyle(.white.opacity(0.65)).frame(width: 12, height: 14)
